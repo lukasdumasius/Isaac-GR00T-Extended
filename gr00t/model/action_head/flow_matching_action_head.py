@@ -152,6 +152,10 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     num_target_vision_tokens: int = field(
         default=32, metadata={"help": "Number of target vision tokens."}
     )
+    simplified_feature_fusion: bool = field(
+        default=True,
+        metadata={"help": "If True: shared LayerNorm/Attention for intermediate features (Option 1). If False: layer-specific processing (Option 2)."}
+    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -204,6 +208,17 @@ class FlowmatchingActionHead(nn.Module):
             if config.use_vlln
             else nn.Identity()
         )
+
+        # Layer-specific processing for intermediate features (Option 2)
+        if not config.simplified_feature_fusion:
+            self.intermediate_layer_norms = nn.ModuleList([
+                nn.LayerNorm(config.backbone_embedding_dim) 
+                for _ in range(config.num_intermediate_layers)
+            ])
+            self.intermediate_attentions = nn.ModuleList([
+                SelfAttentionTransformer(**config.vl_self_attention_cfg)
+                for _ in range(config.num_intermediate_layers)
+            ]) if config.use_vlln else None
 
         if config.add_pos_embed:
             self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
@@ -265,6 +280,27 @@ class FlowmatchingActionHead(nn.Module):
         backbone_features = self.vlln(backbone_features)
         backbone_features = self.vl_self_attention(backbone_features)
         backbone_output["backbone_features"] = backbone_features
+        
+        # Process intermediate features if available
+        if "backbone_intermediate_features" in backbone_output:
+            intermediate_features = backbone_output["backbone_intermediate_features"]
+            processed_intermediate = []
+            
+            if self.config.simplified_feature_fusion:
+                # Option 1: Shared processing (default, recommended)
+                for feat in intermediate_features:
+                    feat = self.vlln(feat)
+                    processed_intermediate.append(feat)
+            else:
+                # Option 2: Layer-specific processing (experimental)
+                for i, feat in enumerate(intermediate_features):
+                    feat = self.intermediate_layer_norms[i](feat)
+                    if self.intermediate_attentions is not None:
+                        feat = self.intermediate_attentions[i](feat)
+                    processed_intermediate.append(feat)
+            
+            backbone_output["backbone_intermediate_features"] = processed_intermediate
+        
         return backbone_output
 
     def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
@@ -326,12 +362,18 @@ class FlowmatchingActionHead(nn.Module):
         sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
         vl_attn_mask = backbone_output.backbone_attention_mask
+        
+        # Prepare intermediate features if available
+        encoder_hidden_states_list = None
+        if "backbone_intermediate_features" in backbone_output:
+            encoder_hidden_states_list = backbone_output["backbone_intermediate_features"]
 
         model_output = self.model(
             hidden_states=sa_embs,
             encoder_hidden_states=vl_embs,
             encoder_attention_mask=vl_attn_mask,
             timestep=t_discretized,
+            encoder_hidden_states_list=encoder_hidden_states_list,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
         )
         pred = self.action_decoder(model_output, embodiment_id)
@@ -390,11 +432,17 @@ class FlowmatchingActionHead(nn.Module):
             future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
             sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
+            # Prepare intermediate features if available
+            encoder_hidden_states_list = None
+            if "backbone_intermediate_features" in backbone_output:
+                encoder_hidden_states_list = backbone_output["backbone_intermediate_features"]
+
             # Run model forward.
             model_output = self.model(
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embs,
                 timestep=timesteps_tensor,
+                encoder_hidden_states_list=encoder_hidden_states_list,
             )
             pred = self.action_decoder(model_output, embodiment_id)
 

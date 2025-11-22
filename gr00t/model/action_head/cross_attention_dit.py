@@ -262,9 +262,10 @@ class DiT(ModelMixin, ConfigMixin):
     def forward(
         self,
         hidden_states: torch.Tensor,  # Shape: (B, T, D)
-        encoder_hidden_states: torch.Tensor,  # Shape: (B, S, D)
+        encoder_hidden_states: torch.Tensor,  # Shape: (B, S, D) or List[(B, S, D)]
         timestep: Optional[torch.LongTensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states_list: Optional[list] = None,
         return_all_hidden_states: bool = False,
     ):
         # Encode timesteps
@@ -272,12 +273,38 @@ class DiT(ModelMixin, ConfigMixin):
 
         # Process through transformer blocks - single pass through the blocks
         hidden_states = hidden_states.contiguous()
-        encoder_hidden_states = encoder_hidden_states.contiguous()
+        
+        # Handle both single encoder_hidden_states and list of intermediate features
+        use_intermediate_features = encoder_hidden_states_list is not None and len(encoder_hidden_states_list) > 0
+        
+        if use_intermediate_features:
+            # Map intermediate encoder features to blocks hierarchically
+            encoder_hidden_states = encoder_hidden_states.contiguous()
+            num_blocks = len(self.transformer_blocks)
+            num_features = len(encoder_hidden_states_list)
+            
+            # Create mapping: block index -> feature list index
+            # This routes early features to early blocks, late features to late blocks
+            feature_indices = []
+            if num_features > 1:
+                step = max(1, (num_features - 1) / (num_blocks - 1)) if num_blocks > 1 else 1
+                feature_indices = [min(int(i * step), num_features - 1) for i in range(num_blocks)]
+            else:
+                feature_indices = [0] * num_blocks
+        else:
+            encoder_hidden_states = encoder_hidden_states.contiguous()
 
         all_hidden_states = [hidden_states]
 
         # Process through transformer blocks
         for idx, block in enumerate(self.transformer_blocks):
+            # Select encoder features for this block
+            if use_intermediate_features:
+                feature_idx = feature_indices[idx]
+                block_encoder_hidden_states = encoder_hidden_states_list[feature_idx]
+            else:
+                block_encoder_hidden_states = encoder_hidden_states
+            
             if idx % 2 == 1 and self.config.interleave_self_attention:
                 hidden_states = block(
                     hidden_states,
@@ -290,7 +317,7 @@ class DiT(ModelMixin, ConfigMixin):
                 hidden_states = block(
                     hidden_states,
                     attention_mask=None,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=block_encoder_hidden_states,
                     encoder_attention_mask=None,
                     temb=temb,
                 )

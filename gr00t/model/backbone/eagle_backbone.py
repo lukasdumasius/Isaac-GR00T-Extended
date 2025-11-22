@@ -38,11 +38,15 @@ class EagleBackbone(nn.Module):
         load_bf16: bool = False,
         eagle_path: str | None = None,
         project_to_dim: int = 1536,
+        extract_intermediate_layers: bool = False,
+        num_intermediate_layers: int = 4,
     ):
         """
         Args:
             tune_llm: whether to tune the LLM model (default: True)
             tune_visual: whether to tune the visual model (default: False)
+            extract_intermediate_layers: whether to extract intermediate layers from Eagle-2
+            num_intermediate_layers: number of intermediate layers to extract (used when extract_intermediate_layers=True)
         """
         super().__init__()
         assert not reproject_vision, "Reproject vision is not implemented here, set to False"
@@ -55,11 +59,20 @@ class EagleBackbone(nn.Module):
         else:
             self.eagle_linear = torch.nn.Identity()
 
+        self.simplified_feature_fusion = True  # If True: shared projection (Option 1). If False: layer-specific projections (Option 2)
+        # Layer-specific projection for intermediate features (Option 2)
+        if not self.simplified_feature_fusion:
+            self.intermediate_projections_eagle_linear = nn.ModuleList([
+                torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
+            ])
+
         # needed since we don't use these layers. Also saves compute
         while len(self.eagle_model.language_model.model.layers) > select_layer:
             self.eagle_model.language_model.model.layers.pop(-1)
 
         self.select_layer = select_layer
+        self.extract_intermediate_layers = extract_intermediate_layers
+        self.num_intermediate_layers = num_intermediate_layers
         self.set_trainable_parameters(tune_llm, tune_visual)
 
     def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool):
@@ -97,7 +110,7 @@ class EagleBackbone(nn.Module):
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
 
-    def forward_eagle(self, vl_input: BatchFeature) -> BatchFeature:
+    def forward_eagle(self, vl_input: BatchFeature) -> tuple:
         eagle_prefix = "eagle_"
         eagle_input = {
             k.removeprefix(eagle_prefix): v
@@ -107,15 +120,51 @@ class EagleBackbone(nn.Module):
         del eagle_input["image_sizes"]
 
         eagle_output = self.eagle_model(**eagle_input, output_hidden_states=True, return_dict=True)
-        eagle_features = eagle_output.hidden_states[self.select_layer]
+        
+        if self.extract_intermediate_layers:
+            # Extract multiple intermediate layers instead of just the final layer
+            all_hidden_states = eagle_output.hidden_states
+            num_layers = len(all_hidden_states)
+            
+            # Select evenly spaced layers across the Eagle model depth
+            # This creates a hierarchical set of features from shallow to deep
+            layer_indices = []
+            if self.num_intermediate_layers > 0:
+                # Include input layer (0) and final layer (num_layers-1)
+                step = max(1, (num_layers - 1) // (self.num_intermediate_layers - 1))
+                layer_indices = [min(i * step, num_layers - 1) for i in range(self.num_intermediate_layers)]
+                # Ensure final layer is included
+                if layer_indices[-1] != num_layers - 1:
+                    layer_indices[-1] = num_layers - 1
+            
+            # Extract and project each intermediate layer
+            eagle_features_list = []
+            for layer_position, idx in enumerate(layer_indices):
+                features = all_hidden_states[idx]
+                
+                if self.simplified_feature_fusion:
+                    # Option 1: Shared projection (default, recommended)
+                    features = self.eagle_linear(features)
+                else:
+                    # Option 2: Layer-specific projection (experimental)
+                    features = self.intermediate_projections_eagle_linear[layer_position](features)
+                
+                eagle_features_list.append(features)
+            
+            # Return both the final features and the list of intermediate features
+            eagle_features = eagle_features_list[-1]  # Use final for backward compatibility
+            return eagle_features, eagle_input["attention_mask"], eagle_features_list
+        else:
+            # Original behavior: only extract final layer
+            eagle_features = eagle_output.hidden_states[self.select_layer]
+            eagle_features = self.eagle_linear(eagle_features)
+            return eagle_features, eagle_input["attention_mask"], None
 
-        eagle_features = self.eagle_linear(eagle_features)
-        return eagle_features, eagle_input["attention_mask"]
 
     def forward(self, vl_input: BatchFeature) -> BatchFeature:
         self.set_frozen_modules_to_eval_mode()
 
-        eagle_embeds, eagle_mask = self.forward_eagle(vl_input)
+        eagle_embeds, eagle_mask, eagle_intermediate_features = self.forward_eagle(vl_input)
 
         # YL (TODO HACK): to resolve DDP issue when tune_visual=True
         # Ensure all trainable parameters in vision_model are used in the forward pass for DDP compatibility
@@ -128,6 +177,13 @@ class EagleBackbone(nn.Module):
                     dummy_term = dummy_term + 0.0 * param.sum()
             eagle_embeds = eagle_embeds + dummy_term
 
-        return BatchFeature(
-            data={"backbone_features": eagle_embeds, "backbone_attention_mask": eagle_mask}
-        )  # [B, T2, hidden_size]
+        output_dict = {
+            "backbone_features": eagle_embeds, 
+            "backbone_attention_mask": eagle_mask
+        }
+        
+        # Add intermediate features if extracted
+        if eagle_intermediate_features is not None:
+            output_dict["backbone_intermediate_features"] = eagle_intermediate_features
+        
+        return BatchFeature(data=output_dict)  # [B, T2, hidden_size]
