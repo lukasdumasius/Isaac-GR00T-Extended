@@ -40,6 +40,7 @@ class EagleBackbone(nn.Module):
         project_to_dim: int = 1536,
         extract_intermediate_layers: bool = False,
         num_intermediate_layers: int = 4,
+        intermediate_feature_fusion_mode: str = "per_layer_feature_simple",
     ):
         """
         Args:
@@ -47,6 +48,7 @@ class EagleBackbone(nn.Module):
             tune_visual: whether to tune the visual model (default: False)
             extract_intermediate_layers: whether to extract intermediate layers from Eagle-2
             num_intermediate_layers: number of intermediate layers to extract (used when extract_intermediate_layers=True)
+            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_simple', 'per_layer_feature_full', 'simplified_global_feature')
         """
         super().__init__()
         assert not reproject_vision, "Reproject vision is not implemented here, set to False"
@@ -59,12 +61,13 @@ class EagleBackbone(nn.Module):
         else:
             self.eagle_linear = torch.nn.Identity()
 
-        self.simplified_feature_fusion = True  # If True: shared projection (Option 1). If False: layer-specific projections (Option 2)
-        # Layer-specific projection for intermediate features (Option 2)
-        if not self.simplified_feature_fusion:
-            self.intermediate_projections_eagle_linear = nn.ModuleList([
-                torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
-            ])
+        self.intermediate_feature_fusion_mode = intermediate_feature_fusion_mode
+        # Layer-specific projections for per_layer_feature_full mode
+        self.intermediate_projections_eagle_linear = nn.ModuleList([
+            torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
+        ])
+        # Fusion layer for simplified_global_feature mode
+        self.global_feature_fusion = nn.Linear(project_to_dim, project_to_dim)
 
         # needed since we don't use these layers. Also saves compute
         while len(self.eagle_model.language_model.model.layers) > select_layer:
@@ -142,14 +145,22 @@ class EagleBackbone(nn.Module):
             for layer_position, idx in enumerate(layer_indices):
                 features = all_hidden_states[idx]
                 
-                if self.simplified_feature_fusion:
-                    # Option 1: Shared projection (default, recommended)
-                    features = self.eagle_linear(features)
-                else:
-                    # Option 2: Layer-specific projection (experimental)
+                if self.intermediate_feature_fusion_mode == "per_layer_feature_full":
+                    # Per-layer projection
                     features = self.intermediate_projections_eagle_linear[layer_position](features)
+                else:
+                    # Shared projection for both per_layer_feature_simple and simplified_global_feature
+                    features = self.eagle_linear(features)
                 
                 eagle_features_list.append(features)
+            
+            # TODO: Test other fusion methods
+            # For simplified_global_feature mode, fuse all features into one global feature
+            if self.intermediate_feature_fusion_mode == "simplified_global_feature":
+                # Average all features and apply fusion layer
+                global_feature = torch.stack(eagle_features_list, dim=0).mean(dim=0)
+                global_feature = self.global_feature_fusion(global_feature)
+                eagle_features_list = [global_feature]  # Return as list with single element
             
             # Return both the final features and the list of intermediate features
             eagle_features = eagle_features_list[-1]  # Use final for backward compatibility

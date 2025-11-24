@@ -173,7 +173,7 @@ Block Assignment:
   Block 10: feature_idx = int(10 × 0.27) = 2 → Features_C
   Block 11: feature_idx = int(11 × 0.27) = 2 → Features_C
 
-Result: Smooth mapping from early to late features
+Smooth mapping from early to late features
 ```
 
 ---
@@ -219,46 +219,6 @@ Input (images, text)
     Action Prediction (MSE loss)
                  ↓
             Backprop
-```
-
----
-
-## 6. Impact on Information Flow
-
-```
-Information Richness Over DiT Depth:
-
-Without Intermediate Features:
-  Block 0:  [████] Same features
-  Block 1:  [████] Same features
-  Block 2:  [████] Same features
-  Block 3:  [████] Same features
-  Block 4:  [████] Same features
-  Block 5:  [████] Same features
-  Block 6:  [████] Same features
-  Block 7:  [████] Same features
-  Block 8:  [████] Same features
-  Block 9:  [████] Same features
-  Block 10: [████] Same features
-  Block 11: [████] Same features
-  
-  Diversity: Low - all blocks get identical input
-
-With Intermediate Features:
-  Block 0:  [█░░░] Early patterns
-  Block 1:  [█░░░] Early patterns
-  Block 2:  [█░░░] Early patterns
-  Block 3:  [█░░░] Early patterns
-  Block 4:  [██░░] Early + mid patterns
-  Block 5:  [██░░] Early + mid patterns
-  Block 6:  [██░░] Early + mid patterns
-  Block 7:  [██░░] Early + mid patterns
-  Block 8:  [███░] Mid + semantic patterns
-  Block 9:  [███░] Mid + semantic patterns
-  Block 10: [███░] Mid + semantic patterns
-  Block 11: [████] Full semantic + task patterns
-  
-  Diversity: High - progressive abstraction levels
 ```
 
 ---

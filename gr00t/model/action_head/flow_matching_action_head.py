@@ -152,9 +152,14 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     num_target_vision_tokens: int = field(
         default=32, metadata={"help": "Number of target vision tokens."}
     )
-    simplified_feature_fusion: bool = field(
-        default=True,
-        metadata={"help": "If True: shared LayerNorm/Attention for intermediate features (Option 1). If False: layer-specific processing (Option 2)."}
+    intermediate_feature_fusion_mode: str = field(
+        default="per_layer_feature_simple",
+        metadata={
+            "help": "How to fuse intermediate Eagle features to DiT blocks. "
+            "Options: 'per_layer_feature_simple' (shared projection/LayerNorm), "
+            "'per_layer_feature_full' (per-layer projection/LayerNorm/attention), "
+            "'simplified_global_feature' (fuse all features into one global feature)"
+        }
     )
 
     def __init__(self, **kwargs):
@@ -209,8 +214,8 @@ class FlowmatchingActionHead(nn.Module):
             else nn.Identity()
         )
 
-        # Layer-specific processing for intermediate features (Option 2)
-        if not config.simplified_feature_fusion:
+        # Layer-specific processing for per_layer_feature_full mode
+        if config.intermediate_feature_fusion_mode == "per_layer_feature_full":
             self.intermediate_layer_norms = nn.ModuleList([
                 nn.LayerNorm(config.backbone_embedding_dim) 
                 for _ in range(config.num_intermediate_layers)
@@ -219,6 +224,9 @@ class FlowmatchingActionHead(nn.Module):
                 SelfAttentionTransformer(**config.vl_self_attention_cfg)
                 for _ in range(config.num_intermediate_layers)
             ]) if config.use_vlln else None
+        else:
+            self.intermediate_layer_norms = None
+            self.intermediate_attentions = None
 
         if config.add_pos_embed:
             self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
@@ -284,20 +292,30 @@ class FlowmatchingActionHead(nn.Module):
         # Process intermediate features if available
         if "backbone_intermediate_features" in backbone_output:
             intermediate_features = backbone_output["backbone_intermediate_features"]
-            processed_intermediate = []
             
-            if self.config.simplified_feature_fusion:
-                # Option 1: Shared processing (default, recommended)
+            if self.config.intermediate_feature_fusion_mode == "simplified_global_feature":
+                # Single global feature - all DiT blocks receive the same feature
+                # (Already fused in eagle_backbone, just apply shared processing)
+                processed_intermediate = []
                 for feat in intermediate_features:
                     feat = self.vlln(feat)
                     processed_intermediate.append(feat)
-            else:
-                # Option 2: Layer-specific processing (experimental)
+            elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_simple":
+                # Simple mode: shared processing
+                processed_intermediate = []
+                for feat in intermediate_features:
+                    feat = self.vlln(feat)
+                    processed_intermediate.append(feat)
+            elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_full":
+                # Full mode: layer-specific processing
+                processed_intermediate = []
                 for i, feat in enumerate(intermediate_features):
                     feat = self.intermediate_layer_norms[i](feat)
                     if self.intermediate_attentions is not None:
                         feat = self.intermediate_attentions[i](feat)
                     processed_intermediate.append(feat)
+            else:
+                raise ValueError(f"Unknown intermediate_feature_fusion_mode: {self.config.intermediate_feature_fusion_mode}")
             
             backbone_output["backbone_intermediate_features"] = processed_intermediate
         
