@@ -66,8 +66,11 @@ class EagleBackbone(nn.Module):
         self.intermediate_projections_eagle_linear = nn.ModuleList([
             torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
         ])
-        # Fusion layer for simplified_global_feature mode
-        self.global_feature_fusion = nn.Linear(project_to_dim, project_to_dim)
+        # Fusion layers for simplified_global_feature mode
+        # Option 1: Average features then project
+        # self.global_feature_fusion_average = nn.Linear(project_to_dim, project_to_dim)
+        # Option 2: Concatenate features then project
+        self.global_feature_fusion_concat = nn.Linear(num_intermediate_layers * project_to_dim, project_to_dim)
 
         # needed since we don't use these layers. Also saves compute
         while len(self.eagle_model.language_model.model.layers) > select_layer:
@@ -157,9 +160,20 @@ class EagleBackbone(nn.Module):
             # TODO: Test other fusion methods
             # For simplified_global_feature mode, fuse all features into one global feature
             if self.intermediate_feature_fusion_mode == "simplified_global_feature":
-                # Average all features and apply fusion layer
-                global_feature = torch.stack(eagle_features_list, dim=0).mean(dim=0)
-                global_feature = self.global_feature_fusion(global_feature)
+                # Option 1: Average all features then project
+                # global_feature = torch.stack(eagle_features_list, dim=0).mean(dim=0)
+                # global_feature = self.global_feature_fusion_average(global_feature)
+                
+                # Option 2: Concatenate and project all features
+                # Stack features: (num_features, batch, seq_len, dim)
+                stacked_features = torch.stack(eagle_features_list, dim=0)  # (num_features, B, T, D)
+                # Reshape to (B, T, num_features * D) for projection
+                B, T, D = eagle_features_list[0].shape
+                num_features = len(eagle_features_list)
+                concatenated = stacked_features.permute(1, 2, 0, 3).reshape(B, T, num_features * D)
+                # Project back to D dimensions
+                global_feature = self.global_feature_fusion_concat(concatenated)
+                
                 eagle_features_list = [global_feature]  # Return as list with single element
             
             # Return both the final features and the list of intermediate features
