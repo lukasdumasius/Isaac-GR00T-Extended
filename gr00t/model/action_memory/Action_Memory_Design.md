@@ -1,5 +1,3 @@
----
-
 # **Critic-Guided Action Memory: Architecture & Design**
 
 ## **1. Overview**
@@ -260,5 +258,3 @@ Consider storing **prefixes**, **suffixes**, and **failure trajectories**, enabl
 * recovery heuristics
 * alternative plans
 * counterfactual reasoning
-
----
