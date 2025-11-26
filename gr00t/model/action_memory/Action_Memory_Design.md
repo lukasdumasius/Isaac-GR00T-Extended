@@ -1,104 +1,264 @@
-Critic-Guided Action Memory: Architecture & Design
+---
 
-1. Overview
+# **Critic-Guided Action Memory: Architecture & Design**
 
-This document details the design of the Action Memory Module for the GR00T VLA model. The core goal is to bridge the gap between low-level control (actions) and high-level semantics (LLM reasoning) by introducing a structured, value-aware memory system.
+## **1. Overview**
 
-Instead of storing raw frame-by-frame actions, we compress entire action trajectories into semantic "concepts" (latents), evaluate them using a Critic, and store them for long-horizon planning and retrieval.
+This document describes the design of the **Action Memory Module** for the **GR00T VLA** model.
+The goal is to bridge the gap between:
 
-2. Core Philosophy
+* **Low-level control** (continuous actions)
+* **High-level semantics** (LLM reasoning)
 
-The design is built on three key insights:
+by introducing a **structured, value-aware memory system**.
 
-Trajectory as the Atomic Unit:
-Single frames (Action, State) lack independent meaning. Only a sequence of actions (a trajectory) represents a coherent behavior (e.g., "pick up cup"). Therefore, memory must operate at the trajectory level.
+Rather than storing raw frame-by-frame actions, we:
 
-Dual-Path Representation:
+1. **Encode entire trajectories** into compact semantic latents
+2. **Evaluate** them with a lightweight value **Critic**
+3. **Store** them in a **Memory Bank** for long-horizon planning and retrieval
 
-Raw Path (High-Freq Control): We preserve the raw, per-frame latents (B, T, D) for the Action Decoder (Diffusion Policy) to ensure kinematic fidelity and smoothness.
+---
 
-Semantic Path (High-Level Reasoning): We compress the trajectory into a single latent (B, 1, D) for the LLM and Memory Bank. This allows the LLM to reason about "intent" rather than "muscle movements."
+## **2. Core Philosophy**
 
-Critic-Guided Optimization:
-By training a lightweight Critic on top of the LLM-processed latent, we provide a task-aligned signal (e.g., success/failure, stability). This gradients flows back to the encoder, forcing it to learn features relevant to task success.
+The design is guided by three foundational insights.
 
-3. Architecture Components
+---
 
-A. Trajectory Encoder (Causal Transformer)
+### **2.1 Trajectory as the Atomic Unit**
 
-We replace simple pooling with a Transformer-based Encoder to capture temporal dependencies and causal structure.
+A single action or frame lacks coherent meaning.
+A *trajectory* represents interpretable concepts such as:
 
-Input: Sequence of raw action latents (B, T, D_action).
+* “pick up the cup”
+* “close the drawer”
+* “push object to target”
 
-Mechanism:
+Thus, memory must operate at the **trajectory** level.
 
-Append [CLS] Token: A learnable token is prepended to the sequence [CLS, t1, t2, ..., tT].
+---
 
-Positional Embedding: We apply a learnable positional embedding to the entire sequence so the model distinguishes "start" from "end."
+### **2.2 Dual-Path Representation**
 
-Self-Attention: A Transformer Encoder processes the sequence. The [CLS] token aggregates information from all time steps via attention, automatically focusing on key moments (e.g., contact, stopping).
+We preserve **two parallel pathways**:
 
-Output: The processed [CLS] token (B, 1, D_hidden) becomes the Trajectory Latent.
+#### **Raw Path → High-Frequency Control**
 
-B. LLM Injection & Projection
+* Retains (B, T, D) per-step latents
+* Ensures smoothness and kinematic fidelity for Diffusion Policies
+* Used for reconstruction and replay
 
-Projector: A linear layer projects the Trajectory Latent to the LLM's embedding dimension (D_hidden -> D_llm).
+#### **Semantic Path → High-Level Reasoning**
 
-LLM Pass: The projected latent is fed into the frozen LLM backbone (e.g., Eagle/Llama). This embeds the action concept into a rich, pre-trained semantic space.
+* Compress trajectory → single latent (B, 1, D)
+* Used for LLM reasoning + memory indexing
+* Represents “intent,” not motor signals
 
-C. Critic Head
+---
 
-Input: The LLM-processed semantic latent.
+### **2.3 Critic-Guided Optimization**
 
-Architecture: A lightweight MLP (Linear -> LayerNorm -> SiLU -> Linear).
+A lightweight **Critic** evaluates trajectory quality (success probability, stability, etc.).
 
-Output: A scalar value v representing the quality of the trajectory (e.g., predicted success probability or stability score).
+The Critic’s gradients:
 
-Loss: Trained via MSE Loss against ground-truth outcome signals.
+* Flow back into the trajectory encoder
+* Encourage useful, task-relevant features
+* Shape the semantic latent space
 
-D. Memory Bank
+---
 
-A dynamic storage system that saves tuples of:
+## **3. Architecture Components**
 
-Semantic Latent: For retrieval and reasoning.
+---
 
-Raw Latent: For replaying or decoding into actions.
+### **3.1 Trajectory Encoder (Causal Transformer)**
 
-Critic Value: For filtering and prioritizing high-quality memories.
+Encodes raw action sequences into a single semantic trajectory latent.
 
-4. Implementation Details
+#### **Input**
 
-File Structure
+```
+Raw Action Latents: (B, T, D_action)
+```
 
-gr00t/model/action_memory/memory_module.py: Contains ActionMemory (Main Module), TrajectoryCompressor (Transformer Encoder), and CriticHead.
+#### **Mechanism**
 
-gr00t/model/gr00t_n1.py: Integration into the main VLA model forward pass via hook injection.
+* **[CLS] Token** is prepended
+* **Learnable Positional Embedding**
+* **Transformer Encoder** with causal structure
+* **[CLS] token output** = trajectory summary
 
-Data Flow
+#### **Output**
 
-Input: Actions (B, T, D)
+```
+Trajectory Latent: (B, 1, D_hidden)
+```
 
-Encode: ActionEncoder (Existing) -> Raw Latents (B, T, D)
+---
 
-Compress: TrajectoryCompressor -> [CLS] + PosEmb -> Transformer -> Trajectory Latent (B, 1, D)
+### **3.2 LLM Injection & Projection**
 
-Reason: Projector -> LLM Backbone -> Semantic Latent
+* **Projection Layer**
+  `D_hidden → D_llm`
 
-Evaluate: Semantic Latent -> CriticHead -> Value
+* **LLM Backbone (Frozen)**
 
-Output: Dict containing critic_value, semantic_latent, and raw_latents.
+  * Eagle / Llama
+  * Produces a rich semantic embedding of the trajectory concept
 
-Training Objective
+---
 
-The module is trained end-to-end (or staged) with the following objective:
+### **3.3 Critic Head**
 
+A lightweight MLP:
 
-$$L_{total} = L_{action\_diffusion} + \lambda \cdot L_{critic}(V_{pred}, V_{target})$$
+```
+Linear → LayerNorm → SiLU → Linear → Value (scalar)
+```
 
-$V_{target}$ is derived from environment feedback (e.g., -distance_to_goal, success_flag).
+#### **Input**
 
-5. Future Considerations
+* LLM-processed semantic latent
 
-Retrieval Mechanism: Currently a placeholder. Future work involves implementing Vector Search (e.g., Cosine Similarity) on the Semantic Latents to retrieve relevant past experiences.
+#### **Output**
 
-Contrastive Learning: We could add an auxiliary loss to pull the Semantic Latent closer to the text embedding of the task description (e.g., "pick up red block") to enforce language alignment.
+* Scalar value
+
+  ```
+  v ∈ ℝ  (success probability / stability score)
+  ```
+
+#### **Loss**
+
+```
+L_critic = MSE(V_pred, V_target)
+```
+
+`V_target` derived from environment feedback (success_flag, -distance_to_goal).
+
+---
+
+### **3.4 Memory Bank**
+
+Stores and retrieves:
+
+* **Semantic Latent** → for reasoning & retrieval
+* **Raw Trajectory Latents** → for replay
+* **Critic Value** → for prioritization
+
+Each entry:
+
+```
+{
+  "semantic": (1, D),
+  "raw": (T, D_action),
+  "value": scalar
+}
+```
+
+---
+
+## **4. Implementation Details**
+
+---
+
+### **4.1 File Structure**
+
+```
+gr00t/
+│
+├── model/
+│   ├── action_memory/
+│   │   └── memory_module.py
+│   │       - ActionMemory
+│   │       - TrajectoryCompressor (Transformer Encoder)
+│   │       - CriticHead
+│   │
+│   └── gr00t_n1.py
+│       - Main VLA integration with hook injection
+```
+
+---
+
+### **4.2 Data Flow**
+
+```
+Actions (B, T, D_action)
+      ↓ ActionEncoder (existing)
+Raw Latents (B, T, D)
+      ↓ TrajectoryCompressor (Transformer)
+Trajectory Latent (B, 1, D_hidden)
+      ↓ Projector → LLM
+Semantic Latent (B, 1, D_llm)
+      ↓ Critic
+Critic Value (scalar)
+```
+
+Output dict:
+
+```python
+{
+    "critic_value": v,
+    "semantic_latent": semantic,
+    "raw_latents": raw_latents,
+}
+```
+
+---
+
+### **4.3 Training Objective**
+
+[
+L_{\text{total}} = L_{\text{action_diffusion}} + \lambda \cdot L_{\text{critic}}
+]
+
+where:
+
+* **L_action_diffusion** – standard Diffusion Policy loss
+* **L_critic** – MSE on value prediction
+
+`λ` controls influence of the critic.
+
+---
+
+## **5. Future Considerations**
+
+---
+
+### **5.1 Retrieval Mechanism**
+
+Implement vector search for semantic latents:
+
+* Cosine similarity
+* FAISS / ScaNN / local attention retrieval
+* Task-conditioned filtering using LLM queries
+
+---
+
+### **5.2 Contrastive Alignment**
+
+Add contrastive losses to align:
+
+```
+Semantic Latent ↔ Text Embedding (task description)
+```
+
+This improves grounding:
+
+* “pick up cup”
+* “open drawer”
+* “push block to target”
+
+---
+
+### **5.3 Multi-Trajectory Value Aggregation**
+
+Consider storing **prefixes**, **suffixes**, and **failure trajectories**, enabling:
+
+* recovery heuristics
+* alternative plans
+* counterfactual reasoning
+
+---
