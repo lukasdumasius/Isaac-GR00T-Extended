@@ -209,7 +209,7 @@ Output dict:
 ### **4.3 Training Objective**
 
 $$
-L_{\text{total}} = L_{\text{action\_diffusion}} + \lambda \cdot L_{\text{critic}}
+L_{\text{total}} = L_{\text{action-diffusion}} + \lambda \cdot L_{\text{critic}}
 $$
 
 where:
