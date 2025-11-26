@@ -28,6 +28,7 @@ from .action_head.flow_matching_action_head import (
     FlowmatchingActionHead,
     FlowmatchingActionHeadConfig,
 )
+from .action_memory import ActionMemory
 from .backbone import EagleBackbone
 
 BACKBONE_FEATURE_KEY = "backbone_features"
@@ -44,6 +45,10 @@ class GR00T_N1_5_Config(PretrainedConfig):
     backbone_cfg: dict = field(init=False, metadata={"help": "Backbone configuration."})
 
     action_head_cfg: dict = field(init=False, metadata={"help": "Action head configuration."})
+
+    # Memory configuration
+    use_action_memory: bool = field(default=False, metadata={"help": "Whether to use action memory module."})
+    memory_cfg: dict = field(default_factory=dict, metadata={"help": "Action memory configuration."})
 
     action_horizon: int = field(init=False, metadata={"help": "Action horizon."})
 
@@ -81,6 +86,21 @@ class GR00T_N1_5(PreTrainedModel):
         self.backbone = EagleBackbone(**config.backbone_cfg)
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
         self.action_head = FlowmatchingActionHead(action_head_cfg)
+
+        if config.use_action_memory:
+            # Infer dimensions
+            # action_head_cfg.input_embedding_dim is usually the hidden size for action processing
+            # For LLM dimension, we try to grab it from backbone config or default to 2048 (Eagle)
+            llm_hidden_size = config.memory_cfg.get("llm_hidden_size", 2048)
+            
+            self.action_memory = ActionMemory(
+                action_dim=config.action_dim,
+                action_hidden_size=action_head_cfg.input_embedding_dim,
+                llm_hidden_size=llm_hidden_size,
+                **{k: v for k, v in config.memory_cfg.items() if k != "llm_hidden_size"}
+            )
+        else:
+            self.action_memory = None
 
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
@@ -164,8 +184,39 @@ class GR00T_N1_5(PreTrainedModel):
     ) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
+        
+        # Action Memory Logic
+        memory_outputs = None
+        if self.action_memory is not None and "actions" in inputs:
+            actions = inputs["actions"] # (B, T, D)
+            # Create a dummy timestep if not provided, or use 0
+            timesteps = torch.zeros(actions.shape[0], device=actions.device)
+            
+            def llm_forward_fn(inputs_embeds):
+                # Defines how to pass the latent through the frozen LLM
+                # We use the underlying language model from EagleBackbone
+                # Output: (B, 1, D) -> (B, 1, D)
+                outputs = self.backbone.eagle_model.language_model(
+                    inputs_embeds=inputs_embeds,
+                    output_hidden_states=True
+                )
+                # Take the last hidden state
+                return outputs.hidden_states[-1]
+
+            memory_outputs = self.action_memory(
+                actions=actions, 
+                timesteps=timesteps,
+                llm_backbone_fn=llm_forward_fn
+            )
+            
+            # Optionally store memory_outputs in the return dict for loss computation
+            
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
+        
+        if memory_outputs is not None:
+            action_head_outputs["memory_results"] = memory_outputs
+            
         return action_head_outputs
 
     def get_action(
