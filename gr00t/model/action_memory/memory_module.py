@@ -77,8 +77,6 @@ class TrajectoryCompressor(nn.Module):
         if T + 1 <= self.pos_emb.shape[1]:
             x = x + self.pos_emb[:, :T+1, :]
         else:
-            # Fallback for overly long sequences (just use max available pos embs)
-            # Alternatively, we could interpolate or warning.
             x = x + self.pos_emb[:, :self.pos_emb.shape[1], :]
         
         # 4. Pass through Transformer Encoder
@@ -90,13 +88,93 @@ class TrajectoryCompressor(nn.Module):
             
         return traj_latent, raw_latents
 
+class MemoryReadoutBlock(nn.Module):
+    """
+    A full Transformer Decoder Block (Cross-Attn + MLP) to robustly retrieve
+    and process memory information. Includes Gating for safe injection.
+    """
+    def __init__(self, query_dim, memory_key_dim, memory_val_dim, hidden_dim, nhead=4, dropout=0.1):
+        super().__init__()
+        
+        # Projections to align Memory dimensions to Query dimension
+        self.key_proj = nn.Linear(memory_key_dim, query_dim)
+        self.val_proj = nn.Linear(memory_val_dim, query_dim)
+        
+        # 1. Cross-Attention
+        self.norm1 = nn.LayerNorm(query_dim)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=query_dim, 
+            num_heads=nhead, 
+            dropout=dropout, 
+            batch_first=True
+        )
+        
+        # 2. Feed-Forward Network (MLP)
+        self.norm2 = nn.LayerNorm(query_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(query_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, query_dim),
+            nn.Dropout(dropout)
+        )
+        
+        # 3. Zero-Initialization Gating (ControlNet Style)
+        # Initialize output projection to zero so initial influence is 0
+        self.output_gate = nn.Linear(query_dim, query_dim)
+        nn.init.zeros_(self.output_gate.weight)
+        nn.init.zeros_(self.output_gate.bias)
+
+    def forward(self, current_query, memory_keys, memory_values, key_padding_mask=None):
+        """
+        Args:
+            current_query: (B, L_q, D_q) - e.g. (B, 1, D) current state
+            memory_keys:   (B, N, D_k)   - Semantic Latents
+            memory_values: (B, N, D_v)   - Compressed/Trajectory Latents
+            key_padding_mask: (B, N)     - Mask for padding keys
+            
+        Returns:
+            fused_context: (B, L_q, D_q)
+        """
+        # Align dimensions
+        K = self.key_proj(memory_keys)   # (B, N, D_q)
+        V = self.val_proj(memory_values) # (B, N, D_q)
+        Q = current_query                # (B, L_q, D_q)
+        
+        # --- Block 1: Cross Attention ---
+        # Pre-Norm
+        Q_norm = self.norm1(Q)
+        
+        # Cross Attn: Q queries K, retrieves V
+        attn_out, _ = self.cross_attn(
+            query=Q_norm, 
+            key=K, 
+            value=V, 
+            key_padding_mask=key_padding_mask
+        )
+        
+        # Residual 1
+        x = Q + attn_out
+        
+        # --- Block 2: FFN ---
+        # Pre-Norm
+        x_norm = self.norm2(x)
+        ffn_out = self.ffn(x_norm)
+        
+        # Residual 2
+        x = x + ffn_out
+        
+        # --- Gating ---
+        gated_out = self.output_gate(x)
+        return gated_out
+
 @dataclass
 class MemoryEntry:
     trajectory_id: int
-    raw_latent: torch.Tensor        # (B, T, D_action)
-    semantic_latent: torch.Tensor   # (B, 1, D_llm)
+    semantic_latent: torch.Tensor   # (B, 1, D_llm) - Key
+    traj_latent: torch.Tensor       # (B, 1, D_hidden) - Value (Compressed)
     value: float                    # Critic score
-    actions: Optional[torch.Tensor] = None 
+    actions: Optional[torch.Tensor] = None # Kept for debugging/visualization only
 
 class ActionMemory(nn.Module):
     def __init__(
@@ -105,8 +183,8 @@ class ActionMemory(nn.Module):
         action_hidden_size: int,
         llm_hidden_size: int,
         critic_hidden_size: int = 256,
-        aggregation: str = "attention", # Kept for compatibility, but effectively unused with new Compressor
-        max_memory_size: int = 1000
+        max_memory_size: int = 1000,
+        readout_nhead: int = 4
     ):
         super().__init__()
         
@@ -125,12 +203,29 @@ class ActionMemory(nn.Module):
             hidden_dim=critic_hidden_size
         )
         
-        # 4. Memory Bank
+        # 4. Memory Readout (Attention + MLP + Gating)
+        # Query: Current Trajectory Latent (Action Space D_hidden)
+        # Key: Semantic Latent (D_llm)
+        # Value: Trajectory Latent (D_hidden)
+        # We output in D_hidden space to fuse back into policy
+        self.readout = MemoryReadoutBlock(
+            query_dim=action_hidden_size,
+            memory_key_dim=llm_hidden_size,
+            memory_val_dim=action_hidden_size,
+            hidden_dim=action_hidden_size * 4,
+            nhead=readout_nhead
+        )
+        
+        # 5. Memory Bank
         self.memory_bank: List[MemoryEntry] = []
         self.max_memory_size = max_memory_size
         self.next_id = 0
 
-    def forward(self, actions, timesteps, llm_backbone_fn=None):
+    def forward(self, actions, timesteps, llm_backbone_fn=None, retrieve=False):
+        """
+        Args:
+            retrieve: If True, perform retrieval using the current action latent as query.
+        """
         # 1. Encode
         traj_latent, raw_latents = self.encoder(actions, timesteps)
         
@@ -146,29 +241,51 @@ class ActionMemory(nn.Module):
         # 4. Critic Evaluation
         value_pred = self.critic(semantic_latent)
         
+        # 5. Retrieval (Optional)
+        retrieved_memory = None
+        if retrieve and len(self.memory_bank) > 0:
+            retrieved_memory = self.perform_retrieval(query_latent=traj_latent)
+        
         return {
             "value": value_pred,
             "semantic_latent": semantic_latent,
-            "raw_latents": raw_latents,
-            "traj_latent": traj_latent
+            "raw_latents": raw_latents, # Still returned for loss computation if needed, but not stored
+            "traj_latent": traj_latent,
+            "retrieved_memory": retrieved_memory
         }
         
+    def perform_retrieval(self, query_latent):
+        """
+        Retrieves relevant memories using the query_latent.
+        """
+        # Stack memory bank into tensors
+        # Keys: (B, N, D_llm)
+        # Vals: (B, N, D_hidden)
+        
+        keys = torch.stack([e.semantic_latent.squeeze(0).squeeze(0) for e in self.memory_bank]).to(query_latent.device)
+        vals = torch.stack([e.traj_latent.squeeze(0).squeeze(0) for e in self.memory_bank]).to(query_latent.device)
+        
+        # Add Batch dim (1, N, D) -> Expand to (B, N, D)
+        B = query_latent.shape[0]
+        keys = keys.unsqueeze(0).expand(B, -1, -1)
+        vals = vals.unsqueeze(0).expand(B, -1, -1)
+        
+        # Run Readout Block
+        fused_mem = self.readout(
+            current_query=query_latent,
+            memory_keys=keys,
+            memory_values=vals
+        )
+        return fused_mem
+
     def compute_critic_loss(self, predicted_value, target_value):
         """
         Computes MSE loss for the critic.
-        
-        Args:
-            predicted_value: (B, 1, 1) or (B, 1) output from self.critic
-            target_value: (B, 1) or (B,) ground truth values (e.g., success=1, fail=0)
-            
-        Returns:
-            loss: scalar tensor
         """
-        # Ensure shapes align
         if predicted_value.dim() == 3:
-            predicted_value = predicted_value.squeeze(1) # (B, 1)
+            predicted_value = predicted_value.squeeze(1)
         if target_value.dim() == 1:
-            target_value = target_value.unsqueeze(1) # (B, 1)
+            target_value = target_value.unsqueeze(1)
             
         return F.mse_loss(predicted_value, target_value)
 
@@ -179,15 +296,15 @@ class ActionMemory(nn.Module):
     def add_to_memory(self, result_dict, original_actions=None):
         batch_size = result_dict["semantic_latent"].shape[0]
         semantic = result_dict["semantic_latent"].detach().cpu()
-        raw = result_dict["raw_latents"].detach().cpu()
+        traj = result_dict["traj_latent"].detach().cpu() 
         values = result_dict["value"].detach().cpu()
         actions = original_actions.detach().cpu() if original_actions is not None else None
         
         for i in range(batch_size):
             entry = MemoryEntry(
                 trajectory_id=self.next_id,
-                raw_latent=raw[i],
-                semantic_latent=semantic[i],
+                semantic_latent=semantic[i], # (1, D_llm)
+                traj_latent=traj[i],         # (1, D_hidden)
                 value=values[i].item(),
                 actions=actions[i] if actions is not None else None
             )
