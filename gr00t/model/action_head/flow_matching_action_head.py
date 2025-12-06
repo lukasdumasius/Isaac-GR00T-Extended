@@ -161,6 +161,10 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
             "'simplified_global_feature' (fuse all features into one global feature)"
         }
     )
+    num_intermediate_layers: int = field(
+        default=12,
+        metadata={"help": "Number of intermediate Eagle layers to extract. Must match backbone."}
+    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

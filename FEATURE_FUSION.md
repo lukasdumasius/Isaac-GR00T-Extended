@@ -23,6 +23,7 @@ Enable and configure in your config:
 
 "action_head_config": {
     "intermediate_feature_fusion_mode": "per_layer_feature_simple",  # Must match backbone
+    "num_intermediate_layers": 12,  # Must match backbone
 }
 ```
 
