@@ -1,70 +1,55 @@
-# **Critic-Guided Action Memory: Architecture & Design**
+# **Action Memory: Architecture & Design**
 
 ## **1. Overview**
 
 This document describes the design of the **Action Memory Module** for the **GR00T VLA** model.
+
 The goal is to bridge the gap between:
 
 * **Low-level control** (continuous actions)
 * **High-level semantics** (LLM reasoning)
 
-by introducing a **structured, value-aware memory system**.
+by introducing a **structured, value-aware memory system** that operates at the **trajectory** level.
 
-Rather than storing raw frame-by-frame actions, we:
+Instead of storing raw frame-by-frame actions, we:
 
 1. **Encode entire trajectories** into compact semantic latents
-2. **Evaluate** them with a lightweight value **Critic**
-3. **Store** only the semantic intent and compressed control blueprint
-4. **Retrieve** relevant memories dynamically using **Gated Cross-Attention**
+2. **Store** only semantic intent and compressed control blueprints
+3. **Retrieve** relevant memories dynamically using **Cross-Attention** inside the Action Head
 
 ---
 
 ## **2. Core Philosophy**
 
-The design is guided by three foundational insights.
-
----
-
 ### **2.1 Trajectory as the Atomic Unit**
 
-A single action or frame lacks coherent meaning.
-A *trajectory* represents interpretable concepts such as:
+A single action or frame is usually not semantically meaningful. A *trajectory* represents interpretable concepts such as:
 
-* "pick up the cup"
-* "close the drawer"
-* "push object to target"
+* “pick up the cup”
+* “close the drawer”
+* “push object to target”
 
-Thus, memory must operate at the **trajectory** level.
+Therefore, the Action Memory operates at the **trajectory** level: each memory item corresponds to a short, coherent **trajectory slice**.
 
 ---
 
 ### **2.2 Dual-Path Representation**
 
-We maintain two parallel pathways:
+We maintain two parallel but coupled representations:
 
-#### **Raw Path → High-Frequency Control**
+#### **(1) Raw Path → High-Frequency Control**
 
-* Retains (B, T, D) per-step latents
-* Ensures smoothness and kinematic fidelity for Diffusion Policies
-* **Note**: Raw latents are used for immediate decoding but NOT stored in the long-term Memory Bank to save space.
+* Per-step latents: `(B, T, D)`
+* Preserve smoothness, kinematic continuity, and fine-grained control for **diffusion policies**
+* Used **inside the policy** for decoding, but **not stored long-term** (to save memory)
 
-#### **Semantic Path → High-Level Reasoning**
+#### **(2) Semantic Path → High-Level Reasoning**
 
-* Compress trajectory → single latent (B, 1, D)
-* Used for LLM reasoning + memory indexing (Key)
-* Represents "intent," not motor signals
+* Compress each trajectory slice into a single latent: `(B, 1, D_hidden)`
+* Project into LLM space for semantic reasoning and memory indexing
+* Represents **intent / behavior pattern**, not raw motor commands
 
----
-
-### **2.3 Critic-Guided Optimization**
-
-A lightweight **Critic** evaluates trajectory quality (success probability, stability, etc.).
-
-The Critic's gradients:
-
-* Flow back into the trajectory encoder
-* Encourage useful, task-relevant features
-* Shape the semantic latent space
+The **Memory Bank** is built from the **Semantic Path** (as keys) and the compressed trajectory latents (as values).
 
 ---
 
@@ -74,212 +59,173 @@ The Critic's gradients:
 
 ### **3.1 Trajectory Encoder (Causal Transformer)**
 
-Encodes raw action sequences into a single semantic trajectory latent.
+Encodes raw action sequences into a single **trajectory latent**.
 
 #### **Input**
 
-```
+```text
 Raw Action Latents: (B, T, D_action)
 ```
 
 #### **Mechanism**
 
-* **[CLS] Token** is prepended
-* **Learnable Positional Embedding**
-* **Transformer Encoder** with causal structure
-* **[CLS] token output** = trajectory summary
+* Prepend a **[CLS] token**
+* Add **learnable positional embeddings**
+* Pass through a **Transformer Encoder** with causal structure (can attend to past, not future)
+* Use the **[CLS] output** as the trajectory summary
 
 #### **Output**
 
-```
+```text
 Trajectory Latent: (B, 1, D_hidden)
 ```
 
----
-
-### **3.2 LLM Injection & Projection**
-
-* **Projection Layer**
-  `D_hidden → D_llm`
-
-* **LLM Backbone (Frozen)**
-
-  * Eagle / Llama
-  * Produces a rich semantic embedding of the trajectory concept
+This latent is the compressed **control blueprint** for the trajectory slice.
 
 ---
 
-### **3.3 Critic Head**
+### **3.2 LLM Projection (Semantic Path)**
 
-A **lightweight MLP** that operates on the Semantic Latent (which has already been processed by the LLM backbone).
+The trajectory latent is projected into the **LLM embedding space** to obtain a semantic representation.
 
-#### **Architecture**
+* **Projection Layer**: `D_hidden → D_llm`
+* **LLM Backbone (Frozen)**: e.g., Eagle / LLaMA encoder tower (or similar)
 
-```
-Semantic Latent (B, 1, D_llm) [from LLM backbone]
-      ↓
-Linear(D_llm → D_hidden)
-      ↓
-LayerNorm
-      ↓
-SiLU
-      ↓
-Linear(D_hidden → D_hidden)
-      ↓
-SiLU
-      ↓
-Linear(D_hidden → 1)
-      ↓
-Critic Value (B, 1) [scalar per trajectory]
-```
+  * Input: Projected trajectory latent `(B, 1, D_llm)`
+  * Output: Semantically enriched latent `(B, 1, D_llm)`
 
-**Key Insight**: The Critic does NOT need to be a separate VLM instance. The Semantic Latent already contains rich, high-level information about Vision + Text + Actions processed by the LLM. The Critic simply learns a lightweight mapping from this semantic representation to a quality score.
-
-#### **Input**
-
-* Semantic Latent (already processed by LLM Backbone A)
-
-#### **Output**
-
-* Critic Value (scalar) - predicted success/quality score
-
-#### **Loss**
-
-```
-L_critic = MSE(V_pred, V_target)
-```
-
-`V_target` derived from environment feedback (success_flag, -distance_to_goal).
+This **Semantic Latent** is used as the **Key** in the Memory Bank.
 
 ---
 
-### **3.4 Memory Readout (Retrieval & Fusion)**
+### **3.3 Memory Readout (Retrieval & Fusion)**
 
-We use a **Gated Transformer Decoder Block** to dynamically retrieve and fuse memories **within the Action Head**.
+Inside the **Action Head** (diffusion policy), we use **Cross-Attention** to retrieve and fuse relevant memories.
 
-**⚠️ Status**: Gated Cross-Attention mechanism is **TO BE IMPLEMENTED** (target: NeurIPS 2025).
+* **Query (`Q`)**: Intermediate action latents during diffusion denoising (from the Action Head)
+* **Key (`K`)**: Semantic Latents stored in the Memory Bank (LLM space)
+* **Value (`V`)**: Trajectory Latents stored in the Memory Bank (Action space)
 
-Current simplified version uses standard cross-attention. Full gated mechanism will be added.
+#### **Cross-Attention (Training: Causal Mask; Inference: No Mask)**
 
-**⚠️ Important - Causal Masking**: 
-- **Training**: Use causal mask to prevent attention to future KV pairs
-- **Inference**: No mask needed (generating autoregressively, no future exists)
+Training uses a causal mask over the **memory time dimension** to prevent future leakage when we simulate incremental memory growth within an episode.
 
-#### **Mechanism: Cross-Attention + MLP + Gating**
+Let:
 
-* **Query ($Q$)**: Action Head Intermediate Latents (during diffusion denoising steps)
-* **Key ($K$)**: Semantic Latents stored in Memory Bank (LLM Space)
-* **Value ($V$)**: Trajectory Latents stored in Memory Bank (Action Space)
+* `Q`: query from current step
+* `K`: concatenated semantic keys from all past slices
+* `V`: corresponding trajectory values
 
-**Cross-Attention (with Causal Mask in Training)**:
-$$
-\text{Attn} = \text{Softmax}\left(\frac{QK^T + M}{\sqrt{d}}\right)V
-$$
+Then:
 
-where $M$ is the causal mask:
-$$
-M_{ij} = \begin{cases}
-0 & \text{if } i \geq j \text{ (can attend to past)} \\
--\infty & \text{if } i < j \text{ (cannot attend to future)}
+[
+\text{Attn}(Q, K, V) = \text{Softmax}\left(\frac{QK^\top + M}{\sqrt{d}}\right)V
+]
+
+where the **causal mask** ( M ) over memory items is:
+
+[
+M_{ij} =
+\begin{cases}
+0 & \text{if } i \ge j \quad (\text{can attend to past}) \
+-\infty & \text{if } i < j \quad (\text{cannot attend to future})
 \end{cases}
-$$
+]
 
-**Gated Fusion (TO BE IMPLEMENTED)**:
-$$
-\text{Output} = \text{Gate}(\text{MLP}(\text{Attn} + Q))
-$$
+* **Training**: `causal_mask=True` (simulate incremental KV cache)
+* **Inference**: `causal_mask=False` (we are already step-by-step; no future exists)
 
-* **Zero-Init Gating**: Ensures the memory module starts with 0 influence and gradually learns to intervene.
+#### **Gated Fusion (Planned)**
 
-**Key Insight**: The Action Head's intermediate latents (noisy states during diffusion) query the memory bank to retrieve relevant past trajectory patterns, which are then fused back into the denoising process via cross-attention.
+The **current implementation** uses standard cross-attention.
+The **planned upgrade** is a **Gated Cross-Attention Block** that:
+
+1. Applies cross-attention to compute a memory-informed latent
+2. Passes it through an MLP
+3. Uses a **zero-initialized gate** to control how much the memory influences the Action Head
+
+Planned form:
+
+```python
+Output = Gate(MLP(Attn(Q, K, V) + Q))
+# Gate is zero-initialized, learned during training
+```
+
+This allows the model to **start with no memory influence** and gradually learn **when** to trust memory.
 
 ---
 
-### **3.5 Memory Bank (KV Cache)**
+### **3.4 Memory Bank (KV Cache)**
 
-The Memory Bank works as an **incremental KV cache**, similar to LLM's KV cache mechanism.
+The **Memory Bank** is an incremental **KV cache** analogous to an LLM’s KV cache, but at **trajectory-slice granularity**.
 
-**Key Properties**:
+* **Key**: Semantic Latent (LLM space)
+* **Value**: Trajectory Latent (action space)
 
-1. **Incremental Growth**: KV pairs accumulate over time within an episode.
-   - Each forward pass generates **new** KV pairs from the latest trajectory slice
-   - These are **appended** to existing KV pairs from previous steps
-   - Similar to how LLM KV cache grows as you process more tokens
+#### **3.4.1 Training: Per-Episode Cache**
 
-2. **Per-Episode Cache**: Each episode maintains its own growing KV cache.
-   - Step 1: Generate KV₁ from slice₁ → Cache = [KV₁]
-   - Step 2: Generate KV₂ from slice₂ → Cache = [KV₁, KV₂]
-   - Step 3: Generate KV₃ from slice₃ → Cache = [KV₁, KV₂, KV₃]
-   - ...
+* Cache is **cleared** at the start of each episode
+* Within an episode, it **grows incrementally** as we process trajectory slices
 
-3. **Query Growing Cache**: The Action Head's intermediate latent queries the **entire accumulated cache**.
-   - At step t, query attends to all KV pairs from steps [1, 2, ..., t]
-   - More context available as episode progresses
+Example:
 
-4. **Cache Management**:
-   - **Training**: Cache is **cleared** at the start of each new episode
-     - Episode boundaries are well-defined in training data
-     - Clean separation between different task instances
-     - Cache size is bounded by episode length (usually < 100 steps)
-   
-   - **Inference**: Cache has **fixed capacity** with **mandatory eviction**
-     - Set maximum capacity (e.g., 100 KV pairs)
-     - When cache is full and new KV arrives: **must evict** one old KV
-     - No clearing - cache persists across tasks indefinitely
-     - Eviction strategies:
-       * **FIFO (First-In-First-Out)**: Remove oldest KV pair
-       * **Attention-based**: Remove KV with lowest attention score
-       * **Value-based**: Remove KV with lowest Critic value
-     - Allows continuous operation without episode boundaries
+```text
+Episode 1 start:
+  KV_cache = []
 
-**Analogy to LLM KV Cache**: 
-- LLM: Process token → Generate (K, V) → Append to cache → Attend over all cached KVs
-- Action Memory: Process trajectory slice → Generate (Semantic, Trajectory) → Append to cache → Attend over all cached KVs
+Forward 1 (slice 1):
+  → KV1 = (Semantic1, Traj1)
+  KV_cache = [KV1]
 
-Example for one episode (Training):
-
-```
-Episode 1 Start: KV_cache = []
-
-Forward 1: Generate (Semantic₁, Traj₁)
-  KV_cache = [(Semantic₁, Traj₁)]
-
-Forward 2: Generate (Semantic₂, Traj₂)
-  KV_cache = [(Semantic₁, Traj₁), (Semantic₂, Traj₂)]
+Forward 2 (slice 2):
+  → KV2 = (Semantic2, Traj2)
+  KV_cache = [KV1, KV2]
 
 ...
+Episode 1 end → cache cleared
+Episode 2 start → KV_cache = []
+```
 
-Episode 1 End
+This keeps training stable and memory bounded by **episode length**.
 
-Episode 2 Start: KV_cache = []  # Cleared for training
+---
 
-Forward 1: Generate (Semantic₁, Traj₁)
-  KV_cache = [(Semantic₁, Traj₁)]
+#### **3.4.2 Inference: Continuous Cache with Eviction**
+
+During **deployment**, we do **not** have clear episode boundaries.
+Instead, we use a **fixed-capacity KV cache** with **mandatory eviction**:
+
+* `max_capacity = N_max` (e.g., 100 trajectory slices)
+* Each new trajectory slice produces a KV pair
+* If cache is full when a new KV arrives → **must evict one old KV**
+
+Eviction strategies (selected by design):
+
+1. **FIFO (First-In-First-Out)** – simplest
+2. **Attention-based** – evict KV with lowest average attention score
+3. **Value / heuristic-based** – evict KV that appears least useful (e.g., old or low-relevance tasks)
+
+Example (FIFO):
+
+```text
+Start: KV_cache = [], MAX = 10
+
+Forward 1..10:
+  Fill cache to [KV1, KV2, ..., KV10]
+
+Forward 11:
+  Cache full → evict KV1
+  KV_cache = [KV2, KV3, ..., KV10, KV11]
+
+Forward 12:
+  Evict KV2
+  KV_cache = [KV3, KV4, ..., KV11, KV12]
 
 ...
+Run indefinitely with rolling window of last 10 slices
 ```
 
-Example for continuous operation (Inference):
-
-```
-Inference Start: KV_cache = [], max_capacity = 10
-
-Forward 1-10: KV_cache grows
-  Forward 1: KV_cache = [KV₁]
-  Forward 2: KV_cache = [KV₁, KV₂]
-  ...
-  Forward 10: KV_cache = [KV₁, KV₂, ..., KV₁₀]  # Full!
-
-Forward 11: Cache FULL, must evict
-  New KV₁₁ arrives → Evict KV₁ (oldest)
-  KV_cache = [KV₂, KV₃, ..., KV₁₀, KV₁₁]  # Still size 10
-
-Forward 12: Cache FULL, must evict
-  New KV₁₂ arrives → Evict KV₂ (oldest)
-  KV_cache = [KV₃, KV₄, ..., KV₁₁, KV₁₂]  # Still size 10
-
-Continue indefinitely: Always evict when full, never clear
-```
+This enables **lifelong operation** without ever clearing memory.
 
 ---
 
@@ -289,7 +235,7 @@ Continue indefinitely: Always evict when full, never clear
 
 ### **4.1 File Structure**
 
-```
+```text
 gr00t/
 │
 ├── model/
@@ -297,898 +243,275 @@ gr00t/
 │   │   └── memory_module.py
 │   │       - ActionMemory
 │   │       - TrajectoryCompressor (Transformer Encoder)
-│   │       - MemoryReadoutBlock (Gated Cross-Attn)
-│   │       - CriticHead
+│   │       - MemoryReadoutBlock (Cross-Attention / Gated Cross-Attention)
 │   │
 │   └── gr00t_n1.py
-│       - Main VLA integration with hook injection
+│       - Main VLA integration (vision + language + action_head + memory)
 ```
 
 ---
 
-### **4.2 Data Flow**
+### **4.2 Data Flow: Training (Per-Batch)**
 
-#### **Memory Bank Population (Training)**
+We assume each batch contains **B episodes (rollouts)**.
 
-KV cache **accumulates incrementally** across forward passes within an episode.
-
-```
-Episode with multiple forward passes:
-
-Forward Pass 1 (latest trajectory slice):
-  New Trajectory Slice (T_slice steps)
-      ↓ ActionEncoder
-  Raw Latents (1, T_slice, D)
-      ↓ TrajectoryCompressor
-  Trajectory Latent (1, 1, D_hidden) ───────┐
-      ↓ Projector → LLM                     │
-  Semantic Latent (1, 1, D_llm) ────┐       │
-      ↓                             │       │
-      ↓ Lightweight Critic MLP      │       │
-  Critic Value (scalar)             │       │
-                                    │       │
-  Generate NEW KV Pair:             │       │
-    - Key: Semantic Latent ◄────────┘       │
-    - Value: Trajectory Latent ◄────────────┘
-  
-  KV_cache = [KV₁]  # First entry
-
----
-
-Forward Pass 2 (next trajectory slice):
-  Same process → Generate KV₂
-  
-  KV_cache = [KV₁, KV₂]  # Appended to cache
-
----
-
-Forward Pass t (current trajectory slice):
-  Same process → Generate KVₜ
-  
-  KV_cache = [KV₁, KV₂, ..., KVₜ]  # Growing cache
-
-Batch Processing:
-For batch size B, each sample maintains its own growing KV cache.
-```
-
-#### **Memory Retrieval & Fusion (Action Generation)**
-
-Query attends to **all accumulated KV pairs** in the cache **with causal masking**.
-
-**⚠️ Important**: During training, use **causal mask** to prevent looking into future KV pairs.
-
-```
-At Forward Pass t:
-
-KV Cache: [(K₁, V₁), (K₂, V₂), ..., (Kₜ, Vₜ)]
-          (accumulated from all previous steps)
-                          ↓
-Vision + Text → Backbone → Action Head (Diffusion)
-                                ↓
-                    Intermediate Latent at step t (Query)
-                                ↓
-                                ▼
-                    Cross-Attention with Causal Mask
-                    Q_t = Intermediate Latent (current step t)
-                    K = [K₁, K₂, ..., Kₜ] (all Semantic Latents)
-                    V = [V₁, V₂, ..., Vₜ] (all Trajectory Latents)
-                    
-                    Mask: Q_t can only attend to K₁...Kₜ (not Kₜ₊₁, Kₜ₊₂, ...)
-                          Prevents information leakage from future
-                                ↓
-                        Retrieved Memory
-                        (weighted sum over past trajectories only)
-                                ↓
-                    Fused into Action Generation
-                                ↓
-                    Predicted Actions
-                                ↓
-                    L_action_base = MSE(Predicted, GT)
-
-Next forward: KV cache grows, more context for retrieval
-
----
-
-Stage 1 Training (Critic Only):
-L_critic = MSE(V_pred, V_target)  [Critic on Semantic Latents]
-(Trains Critic independently)
-
-Stage 2 Training (VLA with Frozen Critic):
-Advantage (A) = V_target - V_pred  [from frozen Critic]
-L_total = mean_over_batch(A · L_action_base)
-(Trains VLA with advantage-weighted action loss)
-```
-
----
-
-### **4.3 Training Objective**
-
-The training is divided into **two stages**:
-
----
-
-#### **Stage 1: Pre-train the Critic (Independent)**
-
-In the first stage, we train **only the Critic** to predict trajectory quality:
-
-$$
-L_{\text{critic}} = \text{MSE}(V_{\text{pred}}, V_{\text{target}}) = \| V_{\text{pred}} - V_{\text{target}} \|^2
-$$
-
-where:
-* $V_{\text{pred}}$ is the predicted value from the Independent VLM Critic
-* $V_{\text{target}}$ is the ground-truth reward/success signal from the dataset
-
-**Purpose**: Train the Critic to be an accurate "judge" of trajectory quality **before** using it to guide the VLA.
-
-**Implementation (Stage 1):**
+#### **Step 1: Build Per-Sample KV Caches**
 
 ```python
-# Stage 1: Train Critic Only
-# Each sample maintains its own memory bank
-
-for batch in critic_dataloader:
-    # batch contains B rollout/episodes
-    vision, text, actions, target_value = batch  # Each shape: (B, ...)
+for batch in vla_dataloader:
+    vision, text, actions, ground_truth_actions = batch  # B samples
     batch_size = vision.shape[0]
     
-    # Per-sample memory banks (list of lists)
-    batch_memory_banks = []
-    
-    for sample_idx in range(batch_size):
-        # Get this sample's full trajectory
-        sample_actions = actions[sample_idx]  # (T_total, D_action)
-        
-        # Slice trajectory into windows
-        trajectory_slices = slice_trajectory(sample_actions, window_size=10)
-        # Returns list of slices: [(T_slice, D_action), ...]
-        
-        sample_memory = {"semantic_keys": [], "traj_values": []}
-        
-        # Encode each slice
-        for traj_slice in trajectory_slices:
-            with torch.no_grad():
-                traj_latent = trajectory_compressor(traj_slice.unsqueeze(0))  # (1, 1, D_hidden)
-                semantic_latent = llm_backbone(traj_latent)  # (1, 1, D_llm)
-                
-                # Add to THIS sample's memory
-                sample_memory["semantic_keys"].append(semantic_latent)
-                sample_memory["traj_values"].append(traj_latent)
-        
-        batch_memory_banks.append(sample_memory)
-    
-    # Train Critic on the full trajectories
-    pred_value = critic_model(
-        vision, text, actions
-    )  # (B,) - one value per rollout
-    
-    # Compute critic loss
-    loss_critic = F.mse_loss(pred_value, target_value)
-    
-    # Backpropagation (only updates Critic weights)
-    critic_optimizer.zero_grad()
-    loss_critic.backward()
-    critic_optimizer.step()
-```
-
----
-
-#### **Stage 2: Train VLA with Advantage-Weighted Action Loss**
-
-In the second stage, we **freeze the Critic** and use it to compute advantages that weight the VLA's action loss:
-
-$$
-L_{\text{total}} = A \cdot L_{\text{action-diffusion}}
-$$
-
-where:
-
-**Action Diffusion Loss (Base):**
-
-$$
-L_{\text{action-diffusion}} = \mathbb{E}_{t, \epsilon} \left[ \| \epsilon - \epsilon_\theta(x_t, t, c) \|^2 \right]
-$$
-
-* $x_t$ is the noisy action at timestep $t$
-* $\epsilon$ is the ground-truth noise
-* $\epsilon_\theta$ is the predicted noise from the diffusion model
-* $c$ is the conditioning (vision + language + retrieved memory)
-
-**Advantage Weighting:**
-
-$$
-A = V_{\text{target}} - V_{\text{pred}}
-$$
-
-or alternatively (normalized):
-
-$$
-A = \frac{V_{\text{target}} - V_{\text{pred}}}{\text{std}(V_{\text{target}})}
-$$
-
-**Purpose**:
-* **High-quality trajectories** ($V_{\text{target}}$ high, $V_{\text{pred}}$ accurate) → **Lower advantage** → Less gradient emphasis (already learned well)
-* **Low-quality trajectories** ($V_{\text{target}}$ low) → Can be down-weighted to avoid learning bad examples
-* **Prediction errors** (large $|A|$) → **Higher gradient** → Forces model to learn from mistakes
-
-**Implementation (Stage 2):**
-
-```python
-# Stage 2: Train VLA with Advantage Weighting
-# Critic is frozen, Memory Bank is fully populated
-critic_model.eval()
-
-for batch in vla_dataloader:
-    vision, text, actions, ground_truth_actions, target_value = batch  # B samples
-    
-    # Forward pass through VLA
-    outputs = vla_model(vision, text, actions)
-    
-    # Retrieve from GLOBAL Memory Bank
-    # Each sample in batch queries the same memory bank
-    intermediate_latents = outputs["intermediate_latents"]  # (B, 1, D)
-    
-    # Cross-attention: (B, 1, D) queries (N, D_llm) keys -> (B, N) attention
-    # Then weighted sum over (N, D_hidden) values -> (B, 1, D_hidden)
-    all_semantic_keys = torch.cat(global_memory_bank["semantic_keys"])  # (N, D_llm)
-    all_traj_values = torch.cat(global_memory_bank["traj_values"])      # (N, D_hidden)
-    
-    retrieved_memory = cross_attention(
-        query=intermediate_latents,
-        keys=all_semantic_keys,
-        values=all_traj_values
-    )  # (B, 1, D_hidden) - different for each sample
-    
-    # Continue diffusion with fused memory
-    final_outputs = vla_model.action_head(retrieved_memory)
-    
-    # Compute base action diffusion loss
-    loss_action_base = compute_diffusion_loss(
-        final_outputs["predicted_noise"], 
-        ground_truth_noise
-    )  # (B,)
-    
-    # Get advantage from frozen Critic (computed per sample)
-    with torch.no_grad():
-        pred_value = critic_model(vision, text, actions)  # (B,)
-        advantage = target_value - pred_value  # (B,)
-        # Optional: normalize
-        advantage = advantage / (target_value.std() + 1e-8)
-    
-    # Weight action loss by advantage (element-wise)
-    loss_action_weighted = advantage * loss_action_base  # (B,)
-    
-    # Total loss (mean over batch)
-    loss_total = loss_action_weighted.mean()
-    
-    # Backpropagation (only updates VLA weights)
-    vla_optimizer.zero_grad()
-    loss_total.backward()
-    vla_optimizer.step()
-```
-
----
-
-#### **Summary: Two-Stage Training**
-
-| Stage | Model Trained | Loss Function | Critic Role | Memory Bank |
-|-------|--------------|---------------|-------------|-------------|
-| **Stage 1** | Critic VLM | $L_{\text{critic}} = \text{MSE}(V_{\text{pred}}, V_{\text{target}})$ | Being trained | Built per-sample |
-| **Stage 2** | VLA (Action Head) | $L_{\text{total}} = A \cdot L_{\text{action}}$ | Frozen, provides Advantage | Used for retrieval |
-
----
-
-### **4.4 Training Pseudocode**
-
----
-
-#### **Basic Version (Currently Implemented)**
-
-The basic training version trains only the VLA with memory retrieval, **without Critic supervision**.
-
-```python
-# Basic Training: VLA with Memory Retrieval (No Critic)
-
-for batch in vla_dataloader:
-    # batch contains B rollout/episodes
-    vision, text, actions, ground_truth_actions = batch
-    batch_size = vision.shape[0]
-    
-    # Build KV cache for each sample (dynamically during forward)
     batch_kv_caches = []
     
     for sample_idx in range(batch_size):
+        # Full trajectory for this sample
         sample_actions = actions[sample_idx]  # (T_total, D_action)
         
-        # Slice trajectory into windows
+        # 1) Slice into windows (trajectory units)
         trajectory_slices = slice_trajectory(sample_actions, window_size=10)
         
+        # 2) Initialize KV cache for this sample
         sample_kv_cache = {"semantic_keys": [], "traj_values": []}
         
-        # Generate KV pairs for this sample
+        # 3) Encode each slice → KV pair
         for traj_slice in trajectory_slices:
-            traj_latent = trajectory_compressor(traj_slice.unsqueeze(0))
-            semantic_latent = llm_backbone(traj_latent)
+            traj_latent = trajectory_compressor(traj_slice.unsqueeze(0))  # (1, 1, D_hidden)
+            semantic_latent = llm_backbone(traj_latent)                   # (1, 1, D_llm)
             
-            # Append to this sample's KV cache
             sample_kv_cache["semantic_keys"].append(semantic_latent)
             sample_kv_cache["traj_values"].append(traj_latent)
         
         batch_kv_caches.append(sample_kv_cache)
-    
-    # Forward pass through VLA
+```
+
+#### **Step 2: VLA Forward + Memory Retrieval**
+
+```python
+    # Forward pass through VLA backbone (vision + text + raw actions)
     outputs = vla_model(vision, text, actions)
-    intermediate_latents = outputs["intermediate_latents"]  # (B, 1, D)
+    intermediate_latents = outputs["intermediate_latents"]  # (B, 1, D_model)
     
-    # Retrieve from per-sample KV caches
     retrieved_memories = []
+    
     for sample_idx in range(batch_size):
         sample_kv = batch_kv_caches[sample_idx]
         
         if len(sample_kv["semantic_keys"]) > 0:
-            mem_keys = torch.cat(sample_kv["semantic_keys"])  # (N, D_llm)
-            mem_values = torch.cat(sample_kv["traj_values"])  # (N, D_hidden)
+            mem_keys = torch.cat(sample_kv["semantic_keys"], dim=1)   # (1, N, D_llm)
+            mem_values = torch.cat(sample_kv["traj_values"], dim=1)   # (1, N, D_hidden)
             
-            query = intermediate_latents[sample_idx:sample_idx+1]  # (1, 1, D)
+            query = intermediate_latents[sample_idx:sample_idx+1]     # (1, 1, D_model)
             
-            # Standard cross-attention with CAUSAL MASK
-            # Important: During training, mask future KV pairs
-            # If processing step t, can only attend to KV₁...KVₜ
+            # Cross-attention with CAUSAL MASK (within-sample memory time)
             retrieved = cross_attention(
                 query=query,
                 keys=mem_keys,
                 values=mem_values,
-                causal_mask=True  # Prevent information leakage
-            )
+                causal_mask=True
+            )  # (1, 1, D_hidden)
         else:
             retrieved = torch.zeros_like(intermediate_latents[sample_idx:sample_idx+1])
         
         retrieved_memories.append(retrieved)
     
-    retrieved_memories = torch.cat(retrieved_memories)
+    retrieved_memories = torch.cat(retrieved_memories, dim=0)  # (B, 1, D_hidden)
+```
+
+#### **Step 3: Fuse Memory into Action Head and Compute Loss**
+
+```python
+    # Pass retrieved memory into action head (e.g., concatenation or FiLM-style conditioning)
+    final_outputs = vla_model.action_head(
+        intermediate_latents,
+        retrieved_memories
+    )
     
-    # Generate actions with memory fusion
-    final_outputs = vla_model.action_head(retrieved_memories)
-    
-    # Compute action diffusion loss (standard, no advantage weighting)
+    # Standard diffusion loss
     loss = compute_diffusion_loss(
         final_outputs["predicted_noise"],
         ground_truth_noise
     )
     
-    # Backpropagation
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
     
-    # KV cache cleared after batch (episode boundaries)
+    # KV caches are discarded at the end of the batch (training episodes)
 ```
 
 ---
 
-#### **Advanced Version with Critic (TODO)**
+### **4.3 Training Objective (No Critic)**
 
-The full version includes two-stage training with Critic supervision (see Section 5.2 for implementation requirements).
+The core training objective is **standard diffusion loss**, with memory only influencing the **conditioning**:
 
-**Stage 1: Train Critic**
-```python
-# Train lightweight Critic MLP on semantic latents
-for batch in critic_dataloader:
-    # Generate KV cache and aggregate semantic latents
-    semantic_latents = generate_and_aggregate_semantics(batch)
-    
-    # Critic prediction
-    pred_value = critic_head(semantic_latents)
-    loss_critic = F.mse_loss(pred_value, target_value)
-    
-    critic_optimizer.zero_grad()
-    loss_critic.backward()
-    critic_optimizer.step()
-```
+[
+L_{\text{total}} = L_{\text{action-diffusion}}
+]
 
-**Stage 2: Train VLA with Frozen Critic**
-```python
-critic_head.eval()  # Freeze
+[
+L_{\text{action-diffusion}} = \mathbb{E}*{t, \epsilon} \left[ \lVert \epsilon - \epsilon*\theta(x_t, t, c) \rVert^2 \right]
+]
 
-for batch in vla_dataloader:
-    # Same as basic version: generate KV, retrieve, generate actions
-    retrieved_memories = retrieve_from_kv_cache(batch)
-    final_outputs = vla_model.action_head(retrieved_memories)
-    loss_action_base = compute_diffusion_loss(...)
-    
-    # Compute advantage from frozen Critic
-    with torch.no_grad():
-        semantic_latents = aggregate_semantics(batch)
-        pred_value = critic_head(semantic_latents)
-        advantage = target_value - pred_value
-    
-    # Advantage-weighted loss
-    loss_total = (advantage * loss_action_base).mean()
-    
-    vla_optimizer.zero_grad()
-    loss_total.backward()
-    vla_optimizer.step()
-```
+* ( x_t ): noisy action at timestep ( t )
+* ( \epsilon ): ground-truth noise
+* ( \epsilon_\theta ): predicted noise
+* ( c ): conditioning (vision + language + **retrieved memory**)
+
+**Key Point**: The only change vs. baseline is that the conditioning incorporates **history-aware memory context** derived from past trajectories.
 
 ---
 
-```python
-# Stage 1: Train Critic (lightweight MLP)
-# KV pairs are generated dynamically during each forward pass
-
-for batch in critic_dataloader:
-    # batch contains B rollout/episodes
-    vision, text, actions, target_value = batch  # Each shape: (B, ...)
-    batch_size = vision.shape[0]
-    
-    # Lists to collect semantic latents for Critic
-    all_semantic_latents = []
-    
-    for sample_idx in range(batch_size):
-        # Get this sample's full trajectory
-        sample_actions = actions[sample_idx]  # (T_total, D_action)
-        
-        # Slice trajectory into windows
-        trajectory_slices = slice_trajectory(sample_actions, window_size=10)
-        # Returns list of slices: [(T_slice, D_action), ...]
-        
-        sample_semantics = []
-        
-        # FORWARD PASS: Generate KV pairs for this sample
-        for traj_slice in trajectory_slices:
-            # Encode slice → Generate one KV pair
-            traj_latent = trajectory_compressor(traj_slice.unsqueeze(0))  # (1, 1, D_hidden) [Value]
-            semantic_latent = llm_backbone(traj_latent)  # (1, 1, D_llm) [Key]
-            
-            # KV pair exists only during this forward pass
-            sample_semantics.append(semantic_latent)
-        
-        # Aggregate semantic latents for Critic (e.g., mean or last)
-        rollout_semantic = torch.cat(sample_semantics).mean(dim=0, keepdim=True)  # (1, 1, D_llm)
-        all_semantic_latents.append(rollout_semantic)
-    
-    # Stack all rollout semantics
-    semantic_latents = torch.cat(all_semantic_latents)  # (B, 1, D_llm)
-    
-    # Train Critic: lightweight MLP on semantic latents
-    pred_value = critic_head(semantic_latents).squeeze(-1)  # (B,)
-    
-    # Compute critic loss
-    loss_critic = F.mse_loss(pred_value, target_value)
-    
-    # Backpropagation (only updates Critic head weights)
-    critic_optimizer.zero_grad()
-    loss_critic.backward()
-    critic_optimizer.step()
-    
-    # KV pairs are discarded after this forward pass
-```
-
-#### **Stage 2: Train VLA with Frozen Critic & Memory Retrieval**
+### **4.4 Inference: Continuous Operation with Fixed-Capacity Cache**
 
 ```python
-# Stage 2: Train VLA with advantage-weighting
-# Critic (lightweight MLP) is frozen, memory banks are used for retrieval
-
-critic_head.eval()
-
-for batch in vla_dataloader:
-    # batch contains B rollout/episodes
-    vision, text, actions, ground_truth_actions, target_value = batch
-    batch_size = vision.shape[0]
-    
-    # Build memory banks for this batch (same as Stage 1)
-    batch_memory_banks = []
-    all_semantic_latents = []
-    
-    for sample_idx in range(batch_size):
-        sample_actions = actions[sample_idx]
-        trajectory_slices = slice_trajectory(sample_actions, window_size=10)
-        
-        sample_memory = {"semantic_keys": [], "traj_values": []}
-        sample_semantics = []
-        
-        for traj_slice in trajectory_slices:
-            with torch.no_grad():
-                traj_latent = trajectory_compressor(traj_slice.unsqueeze(0))
-                semantic_latent = llm_backbone(traj_latent)
-                sample_memory["semantic_keys"].append(semantic_latent)
-                sample_memory["traj_values"].append(traj_latent)
-                sample_semantics.append(semantic_latent)
-        
-        batch_memory_banks.append(sample_memory)
-        
-        # Average semantic for Critic
-        rollout_semantic = torch.cat(sample_semantics).mean(dim=0, keepdim=True)
-        all_semantic_latents.append(rollout_semantic)
-    
-    semantic_latents = torch.cat(all_semantic_latents)  # (B, 1, D_llm)
-    
-    # Forward pass through VLA
-    outputs = vla_model(vision, text, actions)
-    intermediate_latents = outputs["intermediate_latents"]  # (B, 1, D)
-    
-    # Retrieve from per-sample memory banks
-    retrieved_memories = []
-    for sample_idx in range(batch_size):
-        # Get this sample's memory
-        sample_memory = batch_memory_banks[sample_idx]
-        sample_keys = torch.cat(sample_memory["semantic_keys"])  # (N_i, D_llm)
-        sample_values = torch.cat(sample_memory["traj_values"])  # (N_i, D_hidden)
-        
-        # Query with this sample's intermediate latent
-        query = intermediate_latents[sample_idx:sample_idx+1]  # (1, 1, D)
-        
-        # Cross-attention retrieval
-        retrieved = cross_attention(
-            query=query,
-            keys=sample_keys,
-            values=sample_values
-        )  # (1, 1, D_hidden)
-        retrieved_memories.append(retrieved)
-    
-    retrieved_memories = torch.cat(retrieved_memories)  # (B, 1, D_hidden)
-    
-    # Continue diffusion with fused memory
-    final_outputs = vla_model.action_head(retrieved_memories)
-    
-    # Compute base action loss
-    loss_action_base = compute_diffusion_loss(
-        final_outputs["predicted_noise"],
-        ground_truth_noise
-    )  # (B,)
-    
-    # Get advantage from frozen Critic (lightweight MLP)
-    with torch.no_grad():
-        pred_value = critic_head(semantic_latents).squeeze(-1)  # (B,)
-        advantage = target_value - pred_value  # (B,)
-        advantage = advantage / (target_value.std() + 1e-8)  # normalize
-    
-    # Weight action loss by advantage
-    loss_action_weighted = advantage * loss_action_base  # (B,)
-    loss_total = loss_action_weighted.mean()
-    
-    # Backpropagation (only updates VLA weights)
-    vla_optimizer.zero_grad()
-    loss_total.backward()
-    vla_optimizer.step()
-```
-
----
-
-### **4.5 Inference Pseudocode**
-
-During inference, the model generates actions step-by-step with **continuous KV cache** (no clearing between episodes).
-
-```python
-# Inference: Generate actions with persistent KV cache and selective eviction
-
 def inference_continuous(vision_stream, text, max_cache_size=100):
     """
-    Generate actions continuously with FIXED capacity KV cache.
-    When cache is full, MUST evict before adding new KV.
+    Continuous inference with a fixed-capacity KV cache.
     """
     vla_model.eval()
     
-    # Initialize KV cache with FIXED capacity
     kv_cache = {"semantic_keys": [], "traj_values": []}
-    MAX_CAPACITY = 100  # Fixed maximum - cannot exceed
-    
     generated_actions = []
     
-    for timestep in range(len(vision_stream)):
-        current_vision = vision_stream[timestep]
+    for t in range(len(vision_stream)):
+        current_vision = vision_stream[t]  # (C, H, W)
         
-        # Build trajectory slice from recent actions
+        # Build trajectory slice from recent generated actions
         if len(generated_actions) >= 10:
-            recent_slice = torch.stack(generated_actions[-10:])
+            recent_slice = torch.stack(generated_actions[-10:])  # (10, D_action)
         elif len(generated_actions) > 0:
-            recent_slice = torch.stack(generated_actions)
+            recent_slice = torch.stack(generated_actions)        # (<10, D_action)
         else:
             recent_slice = None
         
-        # Generate NEW KV pair if we have history
+        # 1) If we have history, update KV cache
         if recent_slice is not None:
             with torch.no_grad():
-                traj_latent = trajectory_compressor(recent_slice.unsqueeze(0))
-                semantic_latent = llm_backbone(traj_latent)
+                traj_latent = trajectory_compressor(recent_slice.unsqueeze(0))  # (1, 1, D_hidden)
+                semantic_latent = llm_backbone(traj_latent)                     # (1, 1, D_llm)
                 
-                # CHECK CAPACITY BEFORE ADDING
-                if len(kv_cache["semantic_keys"]) >= MAX_CAPACITY:
-                    # MUST EVICT - cache is full
-                    # Strategy 1: FIFO (remove oldest)
+                # Evict if full
+                if len(kv_cache["semantic_keys"]) >= max_cache_size:
+                    # Simple FIFO eviction
                     kv_cache["semantic_keys"].pop(0)
                     kv_cache["traj_values"].pop(0)
-                    
-                    # Strategy 2 (alternative): Attention-score based
-                    # eviction_idx = find_lowest_attention_kv(kv_cache, intermediate_latent)
-                    # kv_cache["semantic_keys"].pop(eviction_idx)
-                    # kv_cache["traj_values"].pop(eviction_idx)
-                    
-                    # Strategy 3 (alternative): Critic-value based
-                    # eviction_idx = find_lowest_value_kv(kv_cache, critic_head)
-                    # kv_cache["semantic_keys"].pop(eviction_idx)
-                    # kv_cache["traj_values"].pop(eviction_idx)
                 
-                # Append new KV (now there's space)
+                # Append new KV
                 kv_cache["semantic_keys"].append(semantic_latent)
                 kv_cache["traj_values"].append(traj_latent)
-                
-                # Ensure we never exceed capacity
-                assert len(kv_cache["semantic_keys"]) <= MAX_CAPACITY
         
-        # Forward pass through VLA
+        # 2) Forward pass through VLA backbone
         with torch.no_grad():
             outputs = vla_model(current_vision.unsqueeze(0), text, None)
-            intermediate_latent = outputs["intermediate_latents"]
+            intermediate_latent = outputs["intermediate_latents"]  # (1, 1, D_model)
             
-            # Retrieve from cache (always <= MAX_CAPACITY entries)
+            # 3) Retrieve from cache (no causal mask needed in online inference)
             if len(kv_cache["semantic_keys"]) > 0:
-                mem_keys = torch.cat(kv_cache["semantic_keys"])
-                mem_values = torch.cat(kv_cache["traj_values"])
+                mem_keys = torch.cat(kv_cache["semantic_keys"], dim=1)   # (1, N, D_llm)
+                mem_values = torch.cat(kv_cache["traj_values"], dim=1)   # (1, N, D_hidden)
                 
-                # Inference: NO causal mask needed
-                # Already generating step-by-step, no future information exists
                 retrieved = cross_attention(
                     query=intermediate_latent,
                     keys=mem_keys,
                     values=mem_values,
-                    causal_mask=False  # Not needed in inference
+                    causal_mask=False
                 )
             else:
                 retrieved = torch.zeros_like(intermediate_latent)
             
-            # Generate action with memory fusion
-            action = vla_model.action_head(retrieved)
+            # 4) Action head with memory fusion
+            action = vla_model.action_head(intermediate_latent, retrieved)  # (1, 1, D_action)
         
         generated_actions.append(action.squeeze(0))
     
-    return torch.stack(generated_actions)
-
-
-def inference_with_episodes(vision_stream, text):
-    """
-    Training-style inference with explicit episode boundaries (for evaluation).
-    """
-    vla_model.eval()
-    
-    # Episode-based: clear cache at episode start
-    for episode_data in vision_stream:
-        # Clear cache for new episode
-        kv_cache = {"semantic_keys": [], "traj_values": []}
-        
-        generated_actions = []
-        
-        for timestep, current_vision in enumerate(episode_data):
-            # Build slice from recent actions
-            if len(generated_actions) >= 10:
-                recent_slice = torch.stack(generated_actions[-10:])
-                
-                with torch.no_grad():
-                    traj_latent = trajectory_compressor(recent_slice.unsqueeze(0))
-                    semantic_latent = llm_backbone(traj_latent)
-                    
-                    # Append to cache (no eviction needed in bounded episodes)
-                    kv_cache["semantic_keys"].append(semantic_latent)
-                    kv_cache["traj_values"].append(traj_latent)
-            
-            # Forward pass with cached KVs
-            with torch.no_grad():
-                outputs = vla_model(current_vision.unsqueeze(0), text, None)
-                intermediate_latent = outputs["intermediate_latents"]
-                
-                if len(kv_cache["semantic_keys"]) > 0:
-                    mem_keys = torch.cat(kv_cache["semantic_keys"])
-                    mem_values = torch.cat(kv_cache["traj_values"])
-                    retrieved = cross_attention(
-                        query=intermediate_latent,
-                        keys=mem_keys,
-                        values=mem_values
-                    )
-                else:
-                    retrieved = torch.zeros_like(intermediate_latent)
-                
-                action = vla_model.action_head(retrieved)
-            
-            generated_actions.append(action.squeeze(0))
-        
-        # Episode ends, cache cleared for next episode
-        yield torch.stack(generated_actions)
+    return torch.stack(generated_actions)  # (T, D_action)
 ```
 
 ---
 
-## **5. Future Considerations**
+## **5. Future Directions (Memory Core)**
 
----
+### **5.1 Gated Cross-Attention**
 
-### **5.1 Contrastive Alignment**
-
-Add contrastive losses to align:
-
-```
-Semantic Latent ↔ Text Embedding (task description)
-```
-
-This improves grounding:
-
-* "pick up cup"
-* "open drawer"
-* "push block to target"
-
----
-
-### **5.2 Critic Supervision Implementation (TODO)**
-
-Currently, the Critic architecture and loss function (`compute_critic_loss`) are implemented in `memory_module.py` but not integrated into the main training loop.
-
-**Design Decision**: The Critic is a **lightweight MLP head** that operates on Semantic Latents (already processed by the LLM backbone), not a separate VLM instance.
-
-**Required Steps for Implementation:**
-
-1.  **Lightweight Critic Architecture**:
-    *   Implement as a simple MLP: `Linear → LayerNorm → SiLU → Linear → Value`
-    *   Input: Semantic Latent from LLM (B, 1, D_llm)
-    *   Output: Critic Value (B, 1)
-    *   This is much more efficient than using a separate VLM instance
-
-2.  **Data Source**: Ensure the Dataset/DataLoader yields a `reward` or `success` signal (Ground Truth).
-    *   This can be sourced from dataset metadata (e.g., `next.reward` or `success` fields in Parquet files).
-    *   For expert demonstrations, `target_value` can default to `1.0`.
-
-3.  **Training Loop Integration**:
-    *   **Stage 1**: Train Critic head on Semantic Latents with MSE loss
-    *   **Stage 2**: Freeze Critic, use it to compute Advantage for VLA training
-
-4.  **Optimization**:
-    *   Ensure gradients from `loss_critic` flow back through the Critic MLP to shape its weights for accurate value prediction.
-
----
-
-Currently, the memory retrieval uses **standard cross-attention**. The full **Gated Cross-Attention** mechanism is planned for implementation.
-
-**Planned Architecture**:
+Planned upgrade for `MemoryReadoutBlock`:
 
 ```python
 class MemoryReadoutBlock(nn.Module):
-    """
-    Gated Cross-Attention for memory retrieval.
-    TO BE IMPLEMENTED based on NeurIPS 2025 techniques.
-    """
-    def __init__(self, d_model, d_llm, num_heads):
+    def __init__(self, d_model, num_heads):
         super().__init__()
-        # Cross-attention
-        self.cross_attn = nn.MultiheadAttention(d_model, num_heads)
+        self.cross_attn = nn.MultiheadAttention(d_model, num_heads, batch_first=True)
         self.norm1 = nn.LayerNorm(d_model)
         
-        # MLP
         self.mlp = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
             nn.GELU(),
-            nn.Linear(d_model * 4, d_model)
+            nn.Linear(d_model * 4, d_model),
         )
         self.norm2 = nn.LayerNorm(d_model)
         
-        # Zero-init gating
+        # Zero-init gate
         self.gate = nn.Linear(d_model, 1)
         nn.init.zeros_(self.gate.weight)
         nn.init.zeros_(self.gate.bias)
     
     def forward(self, query, memory_keys, memory_values):
-        # Cross-attention
+        # query: (B, 1, D), memory_*: (B, N, D)
         attn_out, _ = self.cross_attn(
-            query=query,
-            key=memory_keys,
-            value=memory_values
-        )
+            query, memory_keys, memory_values
+        )  # (B, 1, D)
         
-        # Residual + Norm
         x = self.norm1(query + attn_out)
-        
-        # MLP
         mlp_out = self.mlp(x)
         x = self.norm2(x + mlp_out)
         
-        # Gating (zero-init)
         gate_value = torch.sigmoid(self.gate(x))  # (B, 1, 1)
-        output = gate_value * x
-        
-        return output
+        return gate_value * x
 ```
 
-**Benefits of Gating**:
-- Memory starts with zero influence (gate ≈ 0)
-- Model learns when to rely on memory vs. immediate inputs
-- Prevents unstable training from uninitialized memory retrieval
+Benefits:
 
-**Current Workaround**: 
-Until gated attention is implemented, use standard cross-attention with careful initialization and learning rate tuning.
-
-Currently, the Critic architecture and loss function (`compute_critic_loss`) are implemented in `memory_module.py` but not integrated into the main training loop.
-
-**Design Decision**: The Critic is a **lightweight MLP head** that operates on Semantic Latents (already processed by the LLM backbone), not a separate VLM instance.
-
-**Required Steps for Implementation:**
-
-1.  **Lightweight Critic Architecture**:
-    *   Implement as a simple MLP: `Linear → LayerNorm → SiLU → Linear → Value`
-    *   Input: Semantic Latent from LLM (B, 1, D_llm)
-    *   Output: Critic Value (B, 1)
-    *   This is much more efficient than using a separate VLM instance
-
-2.  **Data Source**: Ensure the Dataset/DataLoader yields a `reward` or `success` signal (Ground Truth).
-    *   This can be sourced from dataset metadata (e.g., `next.reward` or `success` fields in Parquet files).
-    *   For expert demonstrations, `target_value` can default to `1.0`.
-
-3.  **Training Loop Integration**:
-    *   **Stage 1**: Train Critic head on Semantic Latents with MSE loss
-    *   **Stage 2**: Freeze Critic, use it to compute Advantage for VLA training
-
-4.  **Optimization**:
-    *   Ensure gradients from `loss_critic` flow back through the Critic MLP to shape its weights for accurate value prediction.
-
-```
-[Stage 1: Train Critic & Build Memory Banks]
-
-During this stage, the Memory Bank is being populated:
-
-Ground Truth Actions (B, T, D_action)
-      ↓ ActionEncoder
-Raw Latents (B, T, D)
-      ↓ TrajectoryCompressor
-Trajectory Latent (B, 1, D_hidden)
-      ↓ Projector → LLM (Backbone A)
-Semantic Latent (B, 1, D_llm)
-      ↓
-      ├──→ Store in Memory Bank (Key: Semantic, Value: Trajectory)
-      │
-      └──→ Lightweight Critic MLP
-                  ↓
-          Critic Value (V_pred) [computed from Semantic Latent]
-                  ↕
-          Ground Truth (V_target)
-                  ↓
-          L_critic = MSE(V_pred, V_target)
-                  ↓
-          Backprop (Trains Critic MLP Only)
+* Starts with **no memory influence** (gate ≈ 0)
+* Learns **when** memory is useful
+* Reduces risk of destabilizing early training
 
 ---
 
-[Stage 2: Train VLA with Frozen Critic]
+## **6. Optional Critic Extension (Mentioned Only Here)**
 
-Vision + Text → Backbone → Action Head (Diffusion)
-                                ↓
-                    Intermediate Latent (Query) ──┐
-                                                  │
-Memory Bank:                                      │
-  Keys: All Semantic Latents ◄────────────────────┤
-  Values: All Trajectory Latents                  │
-                                                  │
-                                                  ▼
-                                        Cross-Attention
-                                                  ↓
-                                    Fused Memory Context
-                                                  ↓
-                    Action Head (continues denoising)
-                                                  ↓
-                                    Predicted Actions
-                                                  ↓
-                        L_action_base = MSE(Predicted, GT)
-                                                  ↓
-                        [Compute Advantage from Frozen Critic]
-                        Semantic Latent → Frozen_Critic_MLP → V_pred  [no grad]
-                        Advantage (A) = V_target - V_pred
-                                                  ↓
-                        L_total = A · L_action_base
-                                                  ↓
-                        Backprop (Trains VLA Only)
+> **Note:** The core Action Memory design above works **without** any Critic.
+> The Critic is an **optional extension**, not part of the main module.
 
----
+A possible extension is to add a **lightweight Critic MLP** on top of the **Semantic Latents** to provide **advantage-weighted training**:
 
-Two-Stage Training Summary:
-Stage 1: L_critic = MSE(V_pred, V_target)  →  Trains Lightweight Critic MLP
-Stage 2: L_total = A · L_action             →  Trains VLA (Critic frozen, Advantage computed from Semantic Latent)
+* Input: Aggregated semantic latent for a trajectory (e.g., mean over slices)
+* Output: Scalar value estimate ( V_{\text{pred}} ) for trajectory quality
 
-Note: Critic is a lightweight MLP operating on Semantic Latents (already processed by LLM).
-      No separate VLM instance needed.
-```
+Two-stage training (optional):
+
+1. **Stage 1 – Train Critic Only**
+
+   * Loss:
+     [
+     L_{\text{critic}} = \lVert V_{\text{pred}} - V_{\text{target}} \rVert^2
+     ]
+   * Trains a small MLP head on semantic latents (LLM backbone kept frozen)
+
+2. **Stage 2 – Train VLA with Advantage Weighting**
+
+   * Critic is frozen
+   * Compute advantage:
+     [
+     A = V_{\text{target}} - V_{\text{pred}}
+     ]
+   * Weight diffusion loss per sample:
+     [
+     L_{\text{total}} = \mathbb{E}[A \cdot L_{\text{action-diffusion}}]
+     ]
+
+This may help emphasize trajectories where the model underperforms, but:
+
+* Requires a reliable reward / success signal
+* Increases complexity
+* Is **not required** for the core Action Memory to work
