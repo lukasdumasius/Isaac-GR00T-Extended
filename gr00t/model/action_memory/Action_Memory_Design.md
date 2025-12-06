@@ -490,25 +490,17 @@ A possible extension is to add a **lightweight Critic MLP** on top of the **Sema
 
 Two-stage training (optional):
 
-1. **Stage 1 – Train Critic Only**
+**Stage 1 – Train Critic Only**
 
-   * Loss:
-     $$
-     L_{\text{critic}} = \lVert V_{\text{pred}} - V_{\text{target}} \rVert^2
-     $$
-   * Trains a small MLP head on semantic latents (LLM backbone kept frozen)
+Loss: $L_{\text{critic}} = \lVert V_{\text{pred}} - V_{\text{target}} \rVert^2$
 
-2. **Stage 2 – Train VLA with Advantage Weighting**
+- Trains a small MLP head on semantic latents (LLM backbone kept frozen)
 
-   * Critic is frozen
-   * Compute advantage:
-     $$
-     A = V_{\text{target}} - V_{\text{pred}}
-     $$
-   * Weight diffusion loss per sample:
-     $$
-     L_{\text{total}} = \mathbb{E}[A \cdot L_{\text{action-diffusion}}]
-     $$
+**Stage 2 – Train VLA with Advantage Weighting**
+
+- Critic is frozen
+- Compute advantage: $A = V_{\text{target}} - V_{\text{pred}}$
+- Weight diffusion loss per sample: $L_{\text{total}} = \mathbb{E}[A \cdot L_{\text{action-diffusion}}]$
 
 This may help emphasize trajectories where the model underperforms, but:
 
