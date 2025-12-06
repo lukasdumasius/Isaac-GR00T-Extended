@@ -118,19 +118,19 @@ Let:
 
 Then:
 
-[
+$$
 \text{Attn}(Q, K, V) = \text{Softmax}\left(\frac{QK^\top + M}{\sqrt{d}}\right)V
-]
+$$
 
-where the **causal mask** ( M ) over memory items is:
+where the **causal mask** $M$ over memory items is:
 
-[
+$$
 M_{ij} =
 \begin{cases}
-0 & \text{if } i \ge j \quad (\text{can attend to past}) \
+0 & \text{if } i \ge j \quad (\text{can attend to past}) \\
 -\infty & \text{if } i < j \quad (\text{cannot attend to future})
 \end{cases}
-]
+$$
 
 * **Training**: `causal_mask=True` (simulate incremental KV cache)
 * **Inference**: `causal_mask=False` (we are already step-by-step; no future exists)
@@ -346,18 +346,18 @@ for batch in vla_dataloader:
 
 The core training objective is **standard diffusion loss**, with memory only influencing the **conditioning**:
 
-[
+$$
 L_{\text{total}} = L_{\text{action-diffusion}}
-]
+$$
 
-[
-L_{\text{action-diffusion}} = \mathbb{E}*{t, \epsilon} \left[ \lVert \epsilon - \epsilon*\theta(x_t, t, c) \rVert^2 \right]
-]
+$$
+L_{\text{action-diffusion}} = \mathbb{E}_{t, \epsilon} \left[ \lVert \epsilon - \epsilon_\theta(x_t, t, c) \rVert^2 \right]
+$$
 
-* ( x_t ): noisy action at timestep ( t )
-* ( \epsilon ): ground-truth noise
-* ( \epsilon_\theta ): predicted noise
-* ( c ): conditioning (vision + language + **retrieved memory**)
+* $x_t$: noisy action at timestep $t$
+* $\epsilon$: ground-truth noise
+* $\epsilon_\theta$: predicted noise
+* $c$: conditioning (vision + language + **retrieved memory**)
 
 **Key Point**: The only change vs. baseline is that the conditioning incorporates **history-aware memory context** derived from past trajectories.
 
@@ -486,29 +486,29 @@ Benefits:
 A possible extension is to add a **lightweight Critic MLP** on top of the **Semantic Latents** to provide **advantage-weighted training**:
 
 * Input: Aggregated semantic latent for a trajectory (e.g., mean over slices)
-* Output: Scalar value estimate ( V_{\text{pred}} ) for trajectory quality
+* Output: Scalar value estimate $V_{\text{pred}}$ for trajectory quality
 
 Two-stage training (optional):
 
 1. **Stage 1 – Train Critic Only**
 
    * Loss:
-     [
+     $$
      L_{\text{critic}} = \lVert V_{\text{pred}} - V_{\text{target}} \rVert^2
-     ]
+     $$
    * Trains a small MLP head on semantic latents (LLM backbone kept frozen)
 
 2. **Stage 2 – Train VLA with Advantage Weighting**
 
    * Critic is frozen
    * Compute advantage:
-     [
+     $$
      A = V_{\text{target}} - V_{\text{pred}}
-     ]
+     $$
    * Weight diffusion loss per sample:
-     [
+     $$
      L_{\text{total}} = \mathbb{E}[A \cdot L_{\text{action-diffusion}}]
-     ]
+     $$
 
 This may help emphasize trajectories where the model underperforms, but:
 
