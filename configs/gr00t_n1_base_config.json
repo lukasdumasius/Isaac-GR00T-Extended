@@ -12,7 +12,7 @@
     "project_to_dim": 1536,
     "extract_intermediate_layers": true,
     "num_intermediate_layers": 12,
-    "intermediate_feature_fusion_mode": "per_layer_feature_simple"
+    "intermediate_feature_fusion_mode": "per_layer_feature_full"
   },
   "action_head_cfg": {
     "add_pos_embed": true,
@@ -37,7 +37,7 @@
     "expand_batch": null,
     "use_vlln": true,
     "num_target_vision_tokens": 32,
-    "intermediate_feature_fusion_mode": "per_layer_feature_simple",
+    "intermediate_feature_fusion_mode": "per_layer_feature_full",
     "num_intermediate_layers": 12,
     "diffusion_model_cfg": null,
     "vl_self_attention_cfg": null,

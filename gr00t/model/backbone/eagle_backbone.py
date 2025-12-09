@@ -40,7 +40,7 @@ class EagleBackbone(nn.Module):
         project_to_dim: int = 1536,
         extract_intermediate_layers: bool = False,
         num_intermediate_layers: int = 12,
-        intermediate_feature_fusion_mode: str = "per_layer_feature_simple",
+        intermediate_feature_fusion_mode: str = "per_layer_feature_full",
     ):
         """
         Args:
@@ -48,7 +48,7 @@ class EagleBackbone(nn.Module):
             tune_visual: whether to tune the visual model (default: False)
             extract_intermediate_layers: whether to extract intermediate layers from Eagle-2
             num_intermediate_layers: number of intermediate layers to extract (used when extract_intermediate_layers=True)
-            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_simple', 'per_layer_feature_full', 'simplified_global_feature')
+            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_full' [default], 'per_layer_feature_simple', 'simplified_global_feature')
         """
         super().__init__()
         assert not reproject_vision, "Reproject vision is not implemented here, set to False"
@@ -65,15 +65,24 @@ class EagleBackbone(nn.Module):
             project_to_dim = 1536
             
         self.intermediate_feature_fusion_mode = intermediate_feature_fusion_mode
-        # Layer-specific projections for per_layer_feature_full mode
-        self.intermediate_projections_eagle_linear = nn.ModuleList([
-            torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
-        ])
+        
+        # Layer-specific projections ONLY for per_layer_feature_full mode
+        if intermediate_feature_fusion_mode == "per_layer_feature_full":
+            self.intermediate_projections_eagle_linear = nn.ModuleList([
+                torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
+            ])
+        else:
+            self.intermediate_projections_eagle_linear = None
+            
         # Fusion layers for simplified_global_feature mode
-        # Option 1: Average features then project
-        # self.global_feature_fusion_average = nn.Linear(project_to_dim, project_to_dim)
-        # Option 2: Concatenate features then project
-        self.global_feature_fusion_concat = nn.Linear(num_intermediate_layers * project_to_dim, project_to_dim)
+        if intermediate_feature_fusion_mode == "simplified_global_feature":
+            # Option 1: Average features then project
+            # self.global_feature_fusion_average = nn.Linear(project_to_dim, project_to_dim)
+            # Option 2: Concatenate features then project
+            self.global_feature_fusion_concat = nn.Linear(num_intermediate_layers * project_to_dim, project_to_dim)
+        else:
+            self.global_feature_fusion_concat = None
+
 
         # needed since we don't use these layers. Also saves compute
         while len(self.eagle_model.language_model.model.layers) > select_layer:

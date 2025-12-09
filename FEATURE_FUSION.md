@@ -18,11 +18,11 @@ Enable and configure in your config:
 "backbone_config": {
     "extract_intermediate_layers": True,
     "num_intermediate_layers": 12,  # Recommended range: 4-12
-    "intermediate_feature_fusion_mode": "per_layer_feature_simple",  # Choose mode
+    "intermediate_feature_fusion_mode": "per_layer_feature_full",  # Choose mode (default)
 }
 
 "action_head_config": {
-    "intermediate_feature_fusion_mode": "per_layer_feature_simple",  # Must match backbone
+    "intermediate_feature_fusion_mode": "per_layer_feature_full",  # Must match backbone
     "num_intermediate_layers": 12,  # Must match backbone
 }
 ```
@@ -32,27 +32,28 @@ Enable and configure in your config:
 
 ### Modes
 
-| Aspect | Per-Layer Simple | Per-Layer Full | Global |
-|--------|-----------------|----------------|--------|
+| Aspect | Per-Layer Simple | Per-Layer Full | Simplified Global Feature |
+|--------|-----------------|----------------|---------------------------|
 | Feature routing | Hierarchical | Hierarchical | Single feature to all blocks |
 | Eagle projection | Shared linear | Per-layer linear | Shared linear + fusion |
-| DiT processing | Shared LayerNorm | Per-layer LayerNorm + attention | Shared LayerNorm |
+| DiT processing | Shared LayerNorm + self-attention | Per-layer LayerNorm + self-attention | Shared LayerNorm + self-attention |
 | Parameters | Minimal | Maximum | Medium |
 | Complexity | Low | High | Low |
 
-- **per_layer_feature_simple** (default, recommended)
+- **per_layer_feature_full** (default, recommended)
   - Early Eagle layers feed early DiT blocks, late Eagle layers feed late blocks
-  - Shared linear projection (2048 → 1536 dims) in eagle_backbone
-  - Shared LayerNorm in flow_matching_action_head
-
-- **per_layer_feature_full**
-  - Same hierarchical routing as simple mode
   - Per-layer linear projections in eagle_backbone (one per extracted layer)
   - Per-layer LayerNorm and self-attention in flow_matching_action_head
+
+- **per_layer_feature_simple**
+  - Same hierarchical routing as full mode
+  - Shared linear projection (2048 → 1536 dims) in eagle_backbone
+  - Shared LayerNorm and self-attention in flow_matching_action_head
 
 - **simplified_global_feature**
   - All intermediate Eagle layers averaged into one global feature
   - All DiT blocks receive this single global feature
+  - Shared LayerNorm and self-attention applied to the global feature
   - Hybrid approach combining baseline simplicity with intermediate feature richness
 
 ## Architecture Details

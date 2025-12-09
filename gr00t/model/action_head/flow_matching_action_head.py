@@ -153,12 +153,12 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
         default=32, metadata={"help": "Number of target vision tokens."}
     )
     intermediate_feature_fusion_mode: str = field(
-        default="per_layer_feature_simple",
+        default="per_layer_feature_full",
         metadata={
             "help": "How to fuse intermediate Eagle features to DiT blocks. "
-            "Options: 'per_layer_feature_simple' (shared projection/LayerNorm), "
-            "'per_layer_feature_full' (per-layer projection/LayerNorm/attention), "
-            "'simplified_global_feature' (fuse all features into one global feature)"
+            "Options: 'per_layer_feature_full' (per-layer projection/LayerNorm/self-attention) [default], "
+            "'per_layer_feature_simple' (shared projection/LayerNorm/self-attention), "
+            "'simplified_global_feature' (fuse all features + shared LayerNorm/self-attention)"
         }
     )
     num_intermediate_layers: int = field(
@@ -303,12 +303,14 @@ class FlowmatchingActionHead(nn.Module):
                 processed_intermediate = []
                 for feat in intermediate_features:
                     feat = self.vlln(feat)
+                    feat = self.vl_self_attention(feat)
                     processed_intermediate.append(feat)
             elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_simple":
-                # Simple mode: shared processing
+                # Simple mode: shared processing (LayerNorm + self-attention)
                 processed_intermediate = []
                 for feat in intermediate_features:
                     feat = self.vlln(feat)
+                    feat = self.vl_self_attention(feat)
                     processed_intermediate.append(feat)
             elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_full":
                 # Full mode: layer-specific processing
