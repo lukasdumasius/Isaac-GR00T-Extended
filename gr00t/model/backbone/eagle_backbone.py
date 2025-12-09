@@ -39,7 +39,7 @@ class EagleBackbone(nn.Module):
         eagle_path: str | None = None,
         project_to_dim: int = 1536,
         extract_intermediate_layers: bool = False,
-        num_intermediate_layers: int = 4,
+        num_intermediate_layers: int = 12,
         intermediate_feature_fusion_mode: str = "per_layer_feature_simple",
     ):
         """
@@ -61,6 +61,9 @@ class EagleBackbone(nn.Module):
         else:
             self.eagle_linear = torch.nn.Identity()
 
+        if project_to_dim is None:
+            project_to_dim = 1536
+            
         self.intermediate_feature_fusion_mode = intermediate_feature_fusion_mode
         # Layer-specific projections for per_layer_feature_full mode
         self.intermediate_projections_eagle_linear = nn.ModuleList([

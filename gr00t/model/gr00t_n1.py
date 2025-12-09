@@ -221,8 +221,27 @@ class GR00T_N1_5(PreTrainedModel):
             )
             local_model_path = pretrained_model_name_or_path
 
+        # TODO: can we shorten this
+        # Allow loading with new layers that don't exist in pretrained checkpoint
+        # Load config to get num_intermediate_layers for ignore_keys
+        config = AutoConfig.from_pretrained(local_model_path)
+        num_intermediate_layers = config.backbone_cfg.get("num_intermediate_layers", 12)
+        
+        # Define keys for new layers that won't exist in pretrained checkpoint
+        missing_keys_to_ignore = [
+            f"backbone.intermediate_projections_eagle_linear.{i}.weight" for i in range(num_intermediate_layers)
+        ] + [
+            f"backbone.intermediate_projections_eagle_linear.{i}.bias" for i in range(num_intermediate_layers)
+        ] + [
+            "backbone.global_feature_fusion_concat.weight",
+            "backbone.global_feature_fusion_concat.bias",
+        ]
+        
         pretrained_model = super().from_pretrained(
-            local_model_path, local_model_path=local_model_path, **kwargs
+            local_model_path, 
+            local_model_path=local_model_path, 
+            ignore_mismatched_sizes=True,
+            **kwargs
         )
 
         pretrained_model.backbone.set_trainable_parameters(
