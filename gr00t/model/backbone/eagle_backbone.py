@@ -37,9 +37,9 @@ class EagleBackbone(nn.Module):
         use_flash_attention: bool = False,
         load_bf16: bool = False,
         eagle_path: str | None = None,
-        project_to_dim: int = 1536,
-        extract_intermediate_layers: bool = False,
-        num_intermediate_layers: int = 12,
+        project_to_dim: int | None = None,  # None = no projection (use raw 2048 Eagle output)
+        extract_intermediate_layers: bool = True,
+        num_intermediate_layers: int = 4,
         intermediate_feature_fusion_mode: str = "per_layer_feature_full",
     ):
         """
@@ -60,26 +60,32 @@ class EagleBackbone(nn.Module):
             self.eagle_linear = torch.nn.Linear(2048, project_to_dim)
         else:
             self.eagle_linear = torch.nn.Identity()
-
-        if project_to_dim is None:
-            project_to_dim = 1536
             
         self.intermediate_feature_fusion_mode = intermediate_feature_fusion_mode
         
         # Layer-specific projections ONLY for per_layer_feature_full mode
         if intermediate_feature_fusion_mode == "per_layer_feature_full":
-            self.intermediate_projections_eagle_linear = nn.ModuleList([
-                torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
-            ])
+            if project_to_dim is not None:
+                # Use Linear projection when project_to_dim is specified
+                self.intermediate_projections_eagle_linear = nn.ModuleList([
+                    torch.nn.Linear(2048, project_to_dim) for _ in range(num_intermediate_layers)
+                ])
+            else:
+                # Use Identity when no projection (keeps raw 2048 dimensions)
+                self.intermediate_projections_eagle_linear = nn.ModuleList([
+                    torch.nn.Identity() for _ in range(num_intermediate_layers)
+                ])
         else:
             self.intermediate_projections_eagle_linear = None
             
         # Fusion layers for simplified_global_feature mode
         if intermediate_feature_fusion_mode == "simplified_global_feature":
+            # Determine the dimension size for fusion layers
+            fusion_dim = project_to_dim if project_to_dim is not None else 2048
             # Option 1: Average features then project
-            # self.global_feature_fusion_average = nn.Linear(project_to_dim, project_to_dim)
+            # self.global_feature_fusion_average = nn.Linear(fusion_dim, fusion_dim)
             # Option 2: Concatenate features then project
-            self.global_feature_fusion_concat = nn.Linear(num_intermediate_layers * project_to_dim, project_to_dim)
+            self.global_feature_fusion_concat = nn.Linear(num_intermediate_layers * fusion_dim, fusion_dim)
         else:
             self.global_feature_fusion_concat = None
 

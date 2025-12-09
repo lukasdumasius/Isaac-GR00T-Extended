@@ -162,7 +162,7 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
         }
     )
     num_intermediate_layers: int = field(
-        default=12,
+        default=4,
         metadata={"help": "Number of intermediate Eagle layers to extract. Must match backbone."}
     )
 

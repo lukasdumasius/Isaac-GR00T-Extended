@@ -17,17 +17,17 @@ Enable and configure in your config:
 ```python
 "backbone_config": {
     "extract_intermediate_layers": True,
-    "num_intermediate_layers": 12,  # Recommended range: 4-12
+    "num_intermediate_layers": 4,  # Recommended range: 4-12 (default: 4)
     "intermediate_feature_fusion_mode": "per_layer_feature_full",  # Choose mode (default)
 }
 
 "action_head_config": {
     "intermediate_feature_fusion_mode": "per_layer_feature_full",  # Must match backbone
-    "num_intermediate_layers": 12,  # Must match backbone
+    "num_intermediate_layers": 4,  # Must match backbone
 }
 ```
 
-- **num_intermediate_layers**: Evenly-spaced layers to extract from Eagle-2 (32 layers available). DiT has 12 blocks, so 4-12 recommended.
+- **num_intermediate_layers**: Evenly-spaced layers to extract from Eagle-2 (32 layers available). DiT has 12 blocks, so 4-12 recommended (default: 4).
 - **intermediate_feature_fusion_mode**: Controls how features are processed.
 
 ### Modes

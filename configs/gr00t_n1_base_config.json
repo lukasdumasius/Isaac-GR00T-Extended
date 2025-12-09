@@ -11,7 +11,7 @@
     "eagle_path": null,
     "project_to_dim": 1536,
     "extract_intermediate_layers": true,
-    "num_intermediate_layers": 12,
+    "num_intermediate_layers": 4,
     "intermediate_feature_fusion_mode": "per_layer_feature_full"
   },
   "action_head_cfg": {
@@ -38,7 +38,7 @@
     "use_vlln": true,
     "num_target_vision_tokens": 32,
     "intermediate_feature_fusion_mode": "per_layer_feature_full",
-    "num_intermediate_layers": 12,
+    "num_intermediate_layers": 4,
     "diffusion_model_cfg": null,
     "vl_self_attention_cfg": null,
     "max_state_dim": null,

@@ -225,7 +225,7 @@ class GR00T_N1_5(PreTrainedModel):
         # Allow loading with new layers that don't exist in pretrained checkpoint
         # Load config to get num_intermediate_layers for ignore_keys
         config = AutoConfig.from_pretrained(local_model_path)
-        num_intermediate_layers = config.backbone_cfg.get("num_intermediate_layers", 12)
+        num_intermediate_layers = config.backbone_cfg.get("num_intermediate_layers", 4)
         
         # Define keys for new layers that won't exist in pretrained checkpoint
         missing_keys_to_ignore = [
