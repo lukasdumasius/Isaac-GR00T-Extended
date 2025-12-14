@@ -156,9 +156,9 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
         default="per_layer_feature_full",
         metadata={
             "help": "How to fuse intermediate Eagle features to DiT blocks. "
-            "Options: 'per_layer_feature_full' (per-layer projection/LayerNorm/self-attention) [default], "
-            "'per_layer_feature_simple' (shared projection/LayerNorm/self-attention), "
-            "'simplified_global_feature' (fuse all features + shared LayerNorm/self-attention)"
+            "Options: 'per_layer_feature_simple' (shared projection/LayerNorm), "
+            "'per_layer_feature_full' (per-layer projection/LayerNorm/attention), "
+            "'simplified_global_feature' (fuse all features into one global feature)"
         }
     )
     num_intermediate_layers: int = field(
@@ -254,15 +254,6 @@ class FlowmatchingActionHead(nn.Module):
                 self.position_embedding.requires_grad_(False)
         if not tune_diffusion_model:
             self.model.requires_grad_(False)
-        print(f"Tune action head projector: {self.tune_projector}")
-        print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
-        # Check if any parameters are still trainable. If not, print a warning.
-        if not tune_projector and not tune_diffusion_model:
-            for name, p in self.named_parameters():
-                if p.requires_grad:
-                    print(f"Action head trainable parameter: {name}")
-        if not any(p.requires_grad for p in self.parameters()):
-            print("Warning: No action head trainable parameters found.")
 
     def set_frozen_modules_to_eval_mode(self):
         """
@@ -288,6 +279,7 @@ class FlowmatchingActionHead(nn.Module):
         return BatchFeature(data=batch)
 
     def process_backbone_output(self, backbone_output: BatchFeature) -> BatchFeature:
+        # Default behavior, final output features
         backbone_features = backbone_output["backbone_features"]
         backbone_features = self.vlln(backbone_features)
         backbone_features = self.vl_self_attention(backbone_features)
@@ -296,7 +288,7 @@ class FlowmatchingActionHead(nn.Module):
         # Process intermediate features if available
         if "backbone_intermediate_features" in backbone_output:
             intermediate_features = backbone_output["backbone_intermediate_features"]
-            
+
             if self.config.intermediate_feature_fusion_mode == "simplified_global_feature":
                 # Single global feature - all DiT blocks receive the same feature
                 # (Already fused in eagle_backbone, just apply shared processing)
@@ -306,7 +298,7 @@ class FlowmatchingActionHead(nn.Module):
                     feat = self.vl_self_attention(feat)
                     processed_intermediate.append(feat)
             elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_simple":
-                # Simple mode: shared processing (LayerNorm + self-attention)
+                # Simple mode: shared processing
                 processed_intermediate = []
                 for feat in intermediate_features:
                     feat = self.vlln(feat)

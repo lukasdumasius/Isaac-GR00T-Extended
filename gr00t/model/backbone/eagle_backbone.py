@@ -37,8 +37,8 @@ class EagleBackbone(nn.Module):
         use_flash_attention: bool = False,
         load_bf16: bool = False,
         eagle_path: str | None = None,
-        project_to_dim: int | None = None,  # None = no projection (use raw 2048 Eagle output)
-        extract_intermediate_layers: bool = True,
+        project_to_dim: int = 1536,
+        extract_intermediate_layers: bool = False,
         num_intermediate_layers: int = 4,
         intermediate_feature_fusion_mode: str = "per_layer_feature_full",
     ):
@@ -48,7 +48,7 @@ class EagleBackbone(nn.Module):
             tune_visual: whether to tune the visual model (default: False)
             extract_intermediate_layers: whether to extract intermediate layers from Eagle-2
             num_intermediate_layers: number of intermediate layers to extract (used when extract_intermediate_layers=True)
-            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_full' [default], 'per_layer_feature_simple', 'simplified_global_feature')
+            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_simple', 'per_layer_feature_full', 'simplified_global_feature')
         """
         super().__init__()
         assert not reproject_vision, "Reproject vision is not implemented here, set to False"
@@ -60,9 +60,8 @@ class EagleBackbone(nn.Module):
             self.eagle_linear = torch.nn.Linear(2048, project_to_dim)
         else:
             self.eagle_linear = torch.nn.Identity()
-            
+
         self.intermediate_feature_fusion_mode = intermediate_feature_fusion_mode
-        
         # Layer-specific projections ONLY for per_layer_feature_full mode
         if intermediate_feature_fusion_mode == "per_layer_feature_full":
             if project_to_dim is not None:
@@ -77,7 +76,6 @@ class EagleBackbone(nn.Module):
                 ])
         else:
             self.intermediate_projections_eagle_linear = None
-            
         # Fusion layers for simplified_global_feature mode
         if intermediate_feature_fusion_mode == "simplified_global_feature":
             # Determine the dimension size for fusion layers
@@ -88,7 +86,6 @@ class EagleBackbone(nn.Module):
             self.global_feature_fusion_concat = nn.Linear(num_intermediate_layers * fusion_dim, fusion_dim)
         else:
             self.global_feature_fusion_concat = None
-
 
         # needed since we don't use these layers. Also saves compute
         while len(self.eagle_model.language_model.model.layers) > select_layer:
@@ -109,15 +106,6 @@ class EagleBackbone(nn.Module):
         if not tune_visual:
             self.eagle_model.vision_model.requires_grad_(False)
             self.eagle_model.mlp1.requires_grad_(False)
-        print(f"Tune backbone llm: {self.tune_llm}")
-        print(f"Tune backbone visual: {self.tune_visual}")
-        # Check if any parameters are still trainable. If not, print a warning.
-        if not tune_llm and not tune_visual:
-            for name, p in self.named_parameters():
-                if p.requires_grad:
-                    print(f"Backbone trainable parameter: {name}")
-        if not any(p.requires_grad for p in self.parameters()):
-            print("Warning: No backbone trainable parameters found.")
 
     def set_frozen_modules_to_eval_mode(self):
         """
@@ -165,14 +153,12 @@ class EagleBackbone(nn.Module):
             eagle_features_list = []
             for layer_position, idx in enumerate(layer_indices):
                 features = all_hidden_states[idx]
-                
                 if self.intermediate_feature_fusion_mode == "per_layer_feature_full":
                     # Per-layer projection
                     features = self.intermediate_projections_eagle_linear[layer_position](features)
                 else:
                     # Shared projection for both per_layer_feature_simple and simplified_global_feature
                     features = self.eagle_linear(features)
-                
                 eagle_features_list.append(features)
             
             # TODO: Test other fusion methods
