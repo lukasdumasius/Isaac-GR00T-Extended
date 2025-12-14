@@ -298,7 +298,7 @@ class FlowmatchingActionHead(nn.Module):
                     feat = self.vl_self_attention(feat)
                     processed_intermediate.append(feat)
             elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_simple":
-                # Simple mode: shared processing
+                # Simple mode: shared processing (LayerNorm + self-attention)
                 processed_intermediate = []
                 for feat in intermediate_features:
                     feat = self.vlln(feat)

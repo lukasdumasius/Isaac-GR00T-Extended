@@ -38,7 +38,7 @@ class EagleBackbone(nn.Module):
         load_bf16: bool = False,
         eagle_path: str | None = None,
         project_to_dim: int = 1536,
-        extract_intermediate_layers: bool = False,
+        extract_intermediate_layers: bool = True,
         num_intermediate_layers: int = 4,
         intermediate_feature_fusion_mode: str = "per_layer_feature_full",
     ):
@@ -46,9 +46,9 @@ class EagleBackbone(nn.Module):
         Args:
             tune_llm: whether to tune the LLM model (default: True)
             tune_visual: whether to tune the visual model (default: False)
-            extract_intermediate_layers: whether to extract intermediate layers from Eagle-2
-            num_intermediate_layers: number of intermediate layers to extract (used when extract_intermediate_layers=True)
-            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_simple', 'per_layer_feature_full', 'simplified_global_feature')
+            extract_intermediate_layers: whether to extract intermediate layers from Eagle-2 (default: True)
+            num_intermediate_layers: number of intermediate layers to extract (used when extract_intermediate_layers=True, default: 4)
+            intermediate_feature_fusion_mode: how to fuse intermediate features ('per_layer_feature_full' [default], 'per_layer_feature_simple', 'simplified_global_feature')
         """
         super().__init__()
         assert not reproject_vision, "Reproject vision is not implemented here, set to False"
