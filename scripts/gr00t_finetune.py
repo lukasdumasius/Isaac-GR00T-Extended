@@ -134,6 +134,19 @@ class ArgsConfig:
     balance_trajectory_weights: bool = True
     """Used in LeRobotMixtureDataset. If True, sample trajectories within a dataset weighted by their length; otherwise, equal weighting."""
 
+    # Action Memory parameters
+    enable_action_memory: bool = False
+    """Whether to enable action memory mechanism for the model."""
+
+    trajectory_window: int = 32
+    """Number of past trajectory steps to use for memory context."""
+
+    memory_encoder_type: Literal["mlp", "transformer"] = "mlp"
+    """Type of encoder to use for memory embeddings."""
+
+    memory_cross_attention_layers: str = ""
+    """Comma-separated list of layer indices where cross-attention with memory should be applied. e.g. '3,7,10,11'"""
+
 
 #####################################################################################
 # Helper functions
@@ -256,12 +269,31 @@ def main(config: ArgsConfig):
     data_max_action_dim = last_transform.max_action_dim
 
     # Load model
+    # Prepare memory configuration if enabled
+    memory_kwargs = {}
+    if config.enable_action_memory:
+        memory_cfg = {
+            # Note: action_hidden_size will be automatically inferred from action_head_cfg.input_embedding_dim
+            "llm_hidden_size": 2048,  # Eagle-2 default
+            "trajectory_window": config.trajectory_window,
+            "memory_encoder_type": config.memory_encoder_type,
+        }
+        if config.memory_cross_attention_layers:
+            memory_cfg["memory_cross_attention_layers"] = [
+                int(x.strip()) for x in config.memory_cross_attention_layers.split(",")
+            ]
+        memory_kwargs = {
+            "use_action_memory": True,
+            "memory_cfg": memory_cfg,
+        }
+    
     model = GR00T_N1_5.from_pretrained(
         pretrained_model_name_or_path=config.base_model_path,
         tune_llm=config.tune_llm,  # backbone's LLM
         tune_visual=config.tune_visual,  # backbone's vision tower
         tune_projector=config.tune_projector,  # action head's projector
         tune_diffusion_model=config.tune_diffusion_model,  # action head's DiT
+        **memory_kwargs,
     )
 
     # Update action_horizon and max_action_dim to match data config

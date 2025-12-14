@@ -56,6 +56,12 @@ class GR00T_N1_5_Config(PretrainedConfig):
     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
 
     def __init__(self, **kwargs):
+        # Set defaults for memory config before calling super().__init__
+        if 'use_action_memory' not in kwargs:
+            kwargs['use_action_memory'] = False
+        if 'memory_cfg' not in kwargs:
+            kwargs['memory_cfg'] = {}
+        
         super().__init__(**kwargs)
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -93,11 +99,17 @@ class GR00T_N1_5(PreTrainedModel):
             # For LLM dimension, we try to grab it from backbone config or default to 2048 (Eagle)
             llm_hidden_size = config.memory_cfg.get("llm_hidden_size", 2048)
             
+            # Filter out parameters that we explicitly set here to avoid conflicts
+            filtered_memory_cfg = {
+                k: v for k, v in config.memory_cfg.items() 
+                if k not in ["llm_hidden_size", "action_hidden_size"]
+            }
+            
             self.action_memory = ActionMemory(
                 action_dim=config.action_dim,
                 action_hidden_size=action_head_cfg.input_embedding_dim,
                 llm_hidden_size=llm_hidden_size,
-                **{k: v for k, v in config.memory_cfg.items() if k != "llm_hidden_size"}
+                **filtered_memory_cfg
             )
         else:
             self.action_memory = None

@@ -18,17 +18,16 @@ conda activate gr00t
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/gr00t_finetune.py \
   --dataset-path /work/hdd/bfxb/data/libero-hfvla \
-  --num-gpus 1 \
-  --base-model-path /work/hdd/bfxb/checkpoints/libero-groot \
+  --num-gpus 4 \
   --output-dir /work/hdd/bfxb/checkpoints/libero-groot-memory \
   --max-steps 200000 \
   --data-config libero_data_config:LiberoDataConfig \
   --video-backend torchvision_av \
   --report-to wandb \
   --save-steps 5000 \
-  --enable-action-memory \
-  --memory-dim 512 \
-  --trajectory-window 16 \
-  --memory-encoder-type mlp \
-  --memory-cross-attention-layers 3,7,10,11
+  # --enable-action-memory \
+  # --memory-dim 1536 \
+  # --trajectory-window 32 \
+  # --memory-encoder-type mlp \
+  # --memory-cross-attention-layers 3,7,10,11
 
