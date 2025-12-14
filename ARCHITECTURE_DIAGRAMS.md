@@ -1,3 +1,10 @@
+## Implementation Status (Dec 2025)
+
+The only code change from the original feature fusion design is the addition of a dummy term to all intermediate features in the EagleBackbone for DDP/gradient connectivity. No attention mask is applied in DiT cross-attention (encoder_attention_mask=None), matching the baseline. Hierarchical routing, proportional slicing, and block-feature mapping remain as shown in the diagrams.
+
+## Troubleshooting
+
+If loss is zero or gradients are NaN, make sure the dummy term is present in all intermediate features. If instability continues, consider adding attention masking for intermediate features.
 # Architecture Diagrams: Intermediate Features Implementation
 
 ## 1. Original Architecture 

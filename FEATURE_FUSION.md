@@ -1,3 +1,10 @@
+## Implementation Status (Dec 2025)
+
+The only code change from the original feature fusion design is the addition of a dummy term to all intermediate features in the EagleBackbone for DDP/gradient connectivity. No attention mask is applied in DiT cross-attention (encoder_attention_mask=None), matching the baseline. Hierarchical routing, proportional slicing, and block-feature mapping remain as described above.
+
+## Troubleshooting
+
+If you see loss = 0 or gradients are NaN, check that the dummy term is present in all intermediate features. If problems persist, try adding proper attention masking for intermediate features in the DiT blocks.
 # Intermediate Feature Fusion
 
 This implementation adds hierarchical routing of intermediate Eagle-2 VLM features to DiT blocks, with three different fusion modes.
@@ -64,9 +71,9 @@ Enable and configure in your config:
 
 ## Files Modified
 
-- `gr00t/model/backbone/eagle_backbone.py` - Feature extraction, projection, and fusion
+- `gr00t/model/backbone/eagle_backbone.py` - Feature extraction, projection, fusion, and DDP dummy term logic
 - `gr00t/model/action_head/flow_matching_action_head.py` - Feature processing pipeline
-- `gr00t/model/action_head/cross_attention_dit.py` - Hierarchical routing (no changes needed)
+- `gr00t/model/action_head/cross_attention_dit.py` - Hierarchical routing (no logic changes except DDP dummy term support)
 
 ## Backward Compatibility
 

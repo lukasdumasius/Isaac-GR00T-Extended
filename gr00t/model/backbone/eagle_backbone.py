@@ -205,6 +205,9 @@ class EagleBackbone(nn.Module):
                 if param.requires_grad:
                     dummy_term = dummy_term + 0.0 * param.sum()
             eagle_embeds = eagle_embeds + dummy_term
+            # Add dummy_term to all intermediate features to keep the graph connected
+            if eagle_intermediate_features is not None:
+                eagle_intermediate_features = [feat + dummy_term for feat in eagle_intermediate_features]
 
         output_dict = {
             "backbone_features": eagle_embeds, 
