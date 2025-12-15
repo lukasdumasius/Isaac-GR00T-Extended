@@ -1,0 +1,5 @@
+{
+  "num_intermediate_layers": 2,
+  "intermediate_feature_fusion_mode": "per_layer_feature_full"
+}
+

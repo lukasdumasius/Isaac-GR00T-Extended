@@ -197,7 +197,7 @@ class GR00T_N1_5(PreTrainedModel):
         return backbone_inputs, action_inputs
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: str, fusion_config: dict | None = None, **kwargs):
         tune_visual = kwargs.pop("tune_visual", True)
         tune_llm = kwargs.pop("tune_llm", False)
         tune_projector = kwargs.pop("tune_projector", True)
@@ -223,8 +223,16 @@ class GR00T_N1_5(PreTrainedModel):
 
         # TODO: can we shorten this
         # Allow loading with new layers that don't exist in pretrained checkpoint
-        # Load config to get num_intermediate_layers for ignore_keys
+        # Load config to get num_intermediate_layers for ignore_keys and allow simple fusion config overrides
         config = AutoConfig.from_pretrained(local_model_path)
+
+        # Apply optional fusion config (e.g., num_intermediate_layers, intermediate_feature_fusion_mode)
+        if fusion_config:
+            if "backbone_cfg" in config.__dict__:
+                config.backbone_cfg.update({k: v for k, v in fusion_config.items() if k in config.backbone_cfg})
+            if "action_head_cfg" in config.__dict__:
+                config.action_head_cfg.update({k: v for k, v in fusion_config.items() if k in config.action_head_cfg})
+
         num_intermediate_layers = config.backbone_cfg.get("num_intermediate_layers", 4)
         
         # Define keys for new layers that won't exist in pretrained checkpoint
@@ -238,10 +246,11 @@ class GR00T_N1_5(PreTrainedModel):
         ]
         
         pretrained_model = super().from_pretrained(
-            local_model_path, 
-            local_model_path=local_model_path, 
+            local_model_path,
+            config=config,
+            local_model_path=local_model_path,
             ignore_mismatched_sizes=True,
-            **kwargs
+            **kwargs,
         )
 
         pretrained_model.backbone.set_trainable_parameters(

@@ -16,9 +16,10 @@
 import os
 import subprocess
 import sys
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 import torch
 import tyro
@@ -118,6 +119,10 @@ class ArgsConfig:
 
     report_to: Literal["wandb", "tensorboard", "azure_ml"] = "wandb"
     """Where to report training metrics (e.g., 'wandb', 'tensorboard', 'azure_ml')."""
+
+    # Intermediate fusion overrides
+    fusion_config: Optional[str] = None
+    """Path to a JSON file with fusion overrides (e.g., num_intermediate_layers)."""
 
     # Data loading parameters
     embodiment_tag: Literal[tuple(EMBODIMENT_TAG_MAPPING.keys())] = "new_embodiment"
@@ -255,6 +260,14 @@ def main(config: ArgsConfig):
     assert hasattr(last_transform, "max_action_dim"), "GR00TTransform must have max_action_dim"
     data_max_action_dim = last_transform.max_action_dim
 
+    # Optional fusion config
+    fusion_config = None
+    if config.fusion_config is not None:
+        fusion_path = Path(config.fusion_config)
+        with open(fusion_path, "r") as f:
+            fusion_config = json.load(f)
+        print(f"Loaded fusion config from {fusion_path}: {fusion_config}")
+
     # Load model
     model = GR00T_N1_5.from_pretrained(
         pretrained_model_name_or_path=config.base_model_path,
@@ -262,6 +275,7 @@ def main(config: ArgsConfig):
         tune_visual=config.tune_visual,  # backbone's vision tower
         tune_projector=config.tune_projector,  # action head's projector
         tune_diffusion_model=config.tune_diffusion_model,  # action head's DiT
+        fusion_config=fusion_config,
     )
 
     # Update action_horizon and max_action_dim to match data config
