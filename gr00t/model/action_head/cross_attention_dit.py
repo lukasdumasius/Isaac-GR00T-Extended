@@ -299,6 +299,10 @@ class DiT(ModelMixin, ConfigMixin):
         # Process through transformer blocks
         for idx, block in enumerate(self.transformer_blocks):
             # Select encoder features for this block
+            # When intermediate features are present, route early/late features
+            # to earlier/later blocks respectively, while the final feature in
+            # encoder_hidden_states_list is the same as the baseline final
+            # feature path (Eagle -> eagle_linear -> vlln -> vl_self_attention).
             if use_intermediate_features:
                 feature_idx = feature_indices[idx]
                 block_encoder_hidden_states = encoder_hidden_states_list[feature_idx]

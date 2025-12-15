@@ -246,9 +246,9 @@ class GR00T_N1_5(PreTrainedModel):
         ]
         
         pretrained_model = super().from_pretrained(
-            local_model_path,
+            local_model_path, 
             config=config,
-            local_model_path=local_model_path,
+            local_model_path=local_model_path, 
             ignore_mismatched_sizes=True,
             **kwargs,
         )

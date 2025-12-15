@@ -360,11 +360,23 @@ class FlowmatchingActionHead(nn.Module):
                     processed_intermediate.append(feat)
             elif self.config.intermediate_feature_fusion_mode == "per_layer_feature_full":
                 # Full mode: layer-specific processing
+                # IMPORTANT: the last feature corresponds to the same final Eagle layer
+                # that the default model uses. For that last feature, we must reuse the
+                # original pretrained path (vlln + vl_self_attention) instead of new
+                # per-layer LayerNorm/attention, so it sees exactly the same weights
+                # as in the baseline GR00T model.
                 processed_intermediate = []
+                last_idx = len(intermediate_features) - 1
                 for i, feat in enumerate(intermediate_features):
-                    feat = self.intermediate_layer_norms[i](feat)
-                    if self.intermediate_attentions is not None:
-                        feat = self.intermediate_attentions[i](feat)
+                    if i == last_idx:
+                        # Final feature: use the same LayerNorm + self-attention as baseline
+                        feat = self.vlln(feat)
+                        feat = self.vl_self_attention(feat)
+                    else:
+                        # Earlier intermediate features: use new per-layer modules
+                        feat = self.intermediate_layer_norms[i](feat)
+                        if self.intermediate_attentions is not None:
+                            feat = self.intermediate_attentions[i](feat)
                     processed_intermediate.append(feat)
             else:
                 raise ValueError(f"Unknown intermediate_feature_fusion_mode: {self.config.intermediate_feature_fusion_mode}")

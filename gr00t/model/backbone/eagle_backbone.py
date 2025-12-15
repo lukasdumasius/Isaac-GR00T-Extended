@@ -154,8 +154,14 @@ class EagleBackbone(nn.Module):
             for layer_position, idx in enumerate(layer_indices):
                 features = all_hidden_states[idx]
                 if self.intermediate_feature_fusion_mode == "per_layer_feature_full":
-                    # Per-layer projection
-                    features = self.intermediate_projections_eagle_linear[layer_position](features)
+                    # Per-layer projection, but use original eagle_linear for final layer to preserve pretrained weights
+                    is_final_layer = (idx == num_layers - 1)
+                    if is_final_layer:
+                        # Final layer uses original pretrained projection
+                        features = self.eagle_linear(features)
+                    else:
+                        # Intermediate layers use new per-layer projections
+                        features = self.intermediate_projections_eagle_linear[layer_position](features)
                 else:
                     # Shared projection for both per_layer_feature_simple and simplified_global_feature
                     features = self.eagle_linear(features)
