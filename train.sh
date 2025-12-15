@@ -27,4 +27,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/gr00t_finetune.py \
   --save-steps 5000 \
   --enable-action-memory \
   --max-memory-size 32 \
-  --memory-readout-nhead 4
+  --memory-readout-nhead 4 \
+  --resume

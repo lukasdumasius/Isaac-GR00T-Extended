@@ -307,7 +307,7 @@ def create_memory_collate_fn(eagle_processor, trajectory_encoder=None):
         # Instead of encoding here (which is slow on CPU in worker process),
         # we'll just collect the action sequences and do encoding later in GPU
         batch_size = len(samples)
-
+        
         # Stack action histories for GPU-side encoding
         if "action_history" in samples[0]:
             histories = [s["action_history"] for s in samples]
