@@ -250,6 +250,12 @@ class GR00T_N1_5(PreTrainedModel):
         pretrained_model.action_head.set_trainable_parameters(
             tune_projector=tune_projector, tune_diffusion_model=tune_diffusion_model
         )
+        
+        # Initialize new intermediate feature fusion layers
+        if hasattr(pretrained_model.action_head, 'intermediate_layer_norms') and \
+           pretrained_model.action_head.intermediate_layer_norms is not None:
+            pretrained_model.action_head.reinitialize_new_layers()
+        
         return pretrained_model
 
 

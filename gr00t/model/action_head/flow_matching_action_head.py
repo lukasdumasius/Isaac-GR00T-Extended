@@ -241,6 +241,60 @@ class FlowmatchingActionHead(nn.Module):
         self.config = config
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
 
+    def _initialize_linear_layers_recursive(self, module, gain=1.0):
+        """Recursively find and initialize all Linear layers in a module."""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, gain=gain)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, (nn.ModuleList, nn.Sequential)):
+            for submodule in module:
+                self._initialize_linear_layers_recursive(submodule, gain)
+        else:
+            for child in module.children():
+                self._initialize_linear_layers_recursive(child, gain)
+
+    def reinitialize_new_layers(self):
+        """Initialize weights for new intermediate feature fusion layers."""
+        if self.intermediate_layer_norms is not None:
+            # Initialize LayerNorms: weight=1.0, bias=0.0
+            for ln in self.intermediate_layer_norms:
+                with torch.no_grad():
+                    ln.weight.fill_(1.0)
+                    if ln.bias is not None:
+                        ln.bias.fill_(0.0)
+        
+        if self.intermediate_attentions is not None:
+            # Initialize all Linear layers in SelfAttentionTransformer blocks
+            for attn in self.intermediate_attentions:
+                for block in attn.transformer_blocks:
+                    # Initialize norm1 and norm3 LayerNorms
+                    if hasattr(block, 'norm1') and hasattr(block.norm1, 'weight'):
+                        with torch.no_grad():
+                            block.norm1.weight.fill_(1.0)
+                            if hasattr(block.norm1, 'bias') and block.norm1.bias is not None:
+                                block.norm1.bias.fill_(0.0)
+                    if hasattr(block, 'norm3') and hasattr(block.norm3, 'weight'):
+                        with torch.no_grad():
+                            block.norm3.weight.fill_(1.0)
+                            if hasattr(block.norm3, 'bias') and block.norm3.bias is not None:
+                                block.norm3.bias.fill_(0.0)
+                    
+                    # Initialize attention projections (to_q, to_k, to_v, to_out)
+                    if hasattr(block, 'attn1'):
+                        if hasattr(block.attn1, 'to_q'):
+                            self._initialize_linear_layers_recursive(block.attn1.to_q, gain=1.0)
+                        if hasattr(block.attn1, 'to_k'):
+                            self._initialize_linear_layers_recursive(block.attn1.to_k, gain=1.0)
+                        if hasattr(block.attn1, 'to_v'):
+                            self._initialize_linear_layers_recursive(block.attn1.to_v, gain=1.0)
+                        if hasattr(block.attn1, 'to_out'):
+                            self._initialize_linear_layers_recursive(block.attn1.to_out, gain=1.0)
+                    
+                    # Initialize feed-forward network
+                    if hasattr(block, 'ff') and hasattr(block.ff, 'net'):
+                        self._initialize_linear_layers_recursive(block.ff.net, gain=1.0)
+
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
         self.tune_projector = tune_projector
         self.tune_diffusion_model = tune_diffusion_model
