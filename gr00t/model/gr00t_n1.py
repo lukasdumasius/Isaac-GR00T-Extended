@@ -94,21 +94,18 @@ class GR00T_N1_5(PreTrainedModel):
         self.action_head = FlowmatchingActionHead(action_head_cfg)
 
         if config.use_action_memory:
-            # Infer dimensions
-            # action_head_cfg.input_embedding_dim is usually the hidden size for action processing
-            # For LLM dimension, we try to grab it from backbone config or default to 2048 (Eagle)
-            llm_hidden_size = config.memory_cfg.get("llm_hidden_size", 2048)
-            
-            # Filter out parameters that we explicitly set here to avoid conflicts
+            # action_head_cfg.input_embedding_dim is the action latent dim (D_hidden).
+            # Memory module follows the design doc: no LLM processing in memory.
+            allowed_memory_kwargs = {"max_memory_size", "readout_nhead"}
             filtered_memory_cfg = {
-                k: v for k, v in config.memory_cfg.items() 
-                if k not in ["llm_hidden_size", "action_hidden_size"]
+                k: v for k, v in config.memory_cfg.items() if k in allowed_memory_kwargs
             }
-            
+
             self.action_memory = ActionMemory(
                 action_dim=config.action_dim,
                 action_hidden_size=action_head_cfg.input_embedding_dim,
-                llm_hidden_size=llm_hidden_size,
+                state_dim=getattr(action_head_cfg, "max_state_dim", None),
+                num_embodiments=getattr(action_head_cfg, "max_num_embodiments", 1),
                 **filtered_memory_cfg
             )
         else:
@@ -141,9 +138,13 @@ class GR00T_N1_5(PreTrainedModel):
 
         if "video" in inputs:
             video = inputs["video"]
-            type_ok = isinstance(video, np.ndarray)
-            dtype_ok = video.dtype == np.uint8
-            shape_ok = len(video.shape) == 6 and video.shape[3] == N_COLOR_CHANNELS
+            type_ok = isinstance(video, (np.ndarray, torch.Tensor))
+            if isinstance(video, torch.Tensor):
+                dtype_ok = video.dtype == torch.uint8
+                shape_ok = len(video.shape) == 6 and video.shape[3] == N_COLOR_CHANNELS
+            else:
+                dtype_ok = video.dtype == np.uint8
+                shape_ok = len(video.shape) == 6 and video.shape[3] == N_COLOR_CHANNELS
             if not type_ok:
                 error_msg += f"\n{type(video)=}"
                 detected_error = True
@@ -199,31 +200,47 @@ class GR00T_N1_5(PreTrainedModel):
         
         # Action Memory Logic
         memory_outputs = None
-        if self.action_memory is not None and "actions" in inputs:
-            actions = inputs["actions"] # (B, T, D)
+        memory_keys = memory_values = None
+        if self.action_memory is not None and "action" in inputs:
+            actions = inputs["action"]  # (B, T, D_action)
             # Create a dummy timestep if not provided, or use 0
             timesteps = torch.zeros(actions.shape[0], device=actions.device)
-            
-            def llm_forward_fn(inputs_embeds):
-                # Defines how to pass the latent through the frozen LLM
-                # We use the underlying language model from EagleBackbone
-                # Output: (B, 1, D) -> (B, 1, D)
-                outputs = self.backbone.eagle_model.language_model(
-                    inputs_embeds=inputs_embeds,
-                    output_hidden_states=True
-                )
-                # Take the last hidden state
-                return outputs.hidden_states[-1]
+
+            states = action_inputs["state"] if "state" in action_inputs else None
+            cat_ids = action_inputs["embodiment_id"] if "embodiment_id" in action_inputs else None
+
+            # text_emb placeholder (design: text-only, no vision; here用零向量占位)
+            text_emb = torch.zeros(
+                actions.shape[0],
+                1,
+                self.action_head.config.input_embedding_dim,
+                device=actions.device,
+                dtype=actions.dtype,
+            )
 
             memory_outputs = self.action_memory(
-                actions=actions, 
+                actions=actions,
                 timesteps=timesteps,
-                llm_backbone_fn=llm_forward_fn
+                states=states,
+                cat_ids=cat_ids,
+                text_emb=text_emb,
+                retrieve=False,  # retrieval handled inside DiT via K/V
             )
+
+            # Build K/V from current trajectory latent (no persistent bank for now)
+            memory_keys, memory_values = self.action_memory.build_from_traj_latent(
+                memory_outputs["traj_latent"], text_emb=text_emb
+            )
+
+            # (Optional) add current traj into bank for future use
+            self.action_memory.add_to_memory(memory_outputs, original_actions=actions)
             
-            # Optionally store memory_outputs in the return dict for loss computation
-            
-        action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+        action_head_outputs = self.action_head(
+            backbone_outputs,
+            action_inputs,
+            memory_keys=memory_keys,
+            memory_values=memory_values,
+        )
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         
         if memory_outputs is not None:
@@ -248,6 +265,12 @@ class GR00T_N1_5(PreTrainedModel):
         action_inputs = self.action_head.prepare_input(inputs)
 
         def to_device_with_maybe_dtype(x):
+            # Skip non-tensor types (e.g., strings for language annotations)
+            if not isinstance(x, (torch.Tensor, np.ndarray)):
+                return x
+            # Convert numpy arrays to torch tensors first
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x)
             # Only cast to self.compute_dtype if the tensor is floating
             if torch.is_floating_point(x):
                 return x.to(self.device, dtype=self.action_head.dtype)

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -152,6 +153,11 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     num_target_vision_tokens: int = field(
         default=32, metadata={"help": "Number of target vision tokens."}
     )
+    
+    # Memory configuration
+    enable_action_memory: bool = field(default=False, metadata={"help": "Whether to enable action memory."})
+    memory_trajectory_window: int = field(default=16, metadata={"help": "Number of action steps per trajectory chunk."})
+    memory_num_chunks: int = field(default=32, metadata={"help": "Number of trajectory chunks in memory bank."})
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -212,6 +218,10 @@ class FlowmatchingActionHead(nn.Module):
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
         self.config = config
+        
+        # Action Memory is handled by GR00T_N1_5, not internally here.
+        self.action_memory = None
+        
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
 
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
@@ -267,7 +277,13 @@ class FlowmatchingActionHead(nn.Module):
         backbone_output["backbone_features"] = backbone_features
         return backbone_output
 
-    def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+    def forward(
+        self,
+        backbone_output: BatchFeature,
+        action_input: BatchFeature,
+        memory_keys: Optional[torch.Tensor] = None,
+        memory_values: Optional[torch.Tensor] = None,
+    ) -> BatchFeature:
         # Set frozen modules to eval
         self.set_frozen_modules_to_eval_mode()
 
@@ -327,12 +343,17 @@ class FlowmatchingActionHead(nn.Module):
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 
+        # Memory should be provided by upstream (GR00T_N1_5) via memory_keys/memory_values
+        # We no longer build it here to avoid duplication and DDP issues.
+
         model_output = self.model(
             hidden_states=sa_embs,
             encoder_hidden_states=vl_embs,
             encoder_attention_mask=vl_attn_mask,
             timestep=t_discretized,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
+            memory_keys=memory_keys,
+            memory_values=memory_values,
         )
         pred = self.action_decoder(model_output, embodiment_id)
         pred_actions = pred[:, -actions.shape[1] :]

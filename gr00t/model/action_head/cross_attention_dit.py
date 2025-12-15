@@ -27,6 +27,8 @@ from diffusers.models.embeddings import (
 )
 from torch import nn
 
+from gr00t.model.action_memory.memory_cross_attention import MemoryCrossAttention
+
 
 class TimestepEncoder(nn.Module):
     def __init__(self, embedding_dim, compute_dtype=torch.float32):
@@ -212,6 +214,10 @@ class DiT(ModelMixin, ConfigMixin):
         positional_embeddings: Optional[str] = "sinusoidal",
         interleave_self_attention=False,
         cross_attention_dim: Optional[int] = None,
+        # Action memory cross-attention (optional)
+        enable_memory_cross_attention: bool = False,
+        memory_cross_attention_layers: Optional[tuple[int, ...]] = None,
+        memory_dim: Optional[int] = None,
     ):
         super().__init__()
 
@@ -250,6 +256,27 @@ class DiT(ModelMixin, ConfigMixin):
             ]
         self.transformer_blocks = nn.ModuleList(all_blocks)
 
+        # Memory cross-attention modules (applied after each block by default)
+        self.enable_memory_cross_attention = enable_memory_cross_attention
+        self.memory_cross_attention_layers = memory_cross_attention_layers
+        if self.enable_memory_cross_attention:
+            mem_dim = memory_dim if memory_dim is not None else self.inner_dim
+            self.memory_attn_blocks = nn.ModuleList(
+                [
+                    MemoryCrossAttention(
+                        query_dim=self.inner_dim,
+                        memory_dim=mem_dim,
+                        num_heads=self.config.num_attention_heads,
+                        dropout=0.0,
+                        bias=True,
+                        gated=False,
+                    )
+                    for _ in range(self.config.num_layers)
+                ]
+            )
+        else:
+            self.memory_attn_blocks = None
+
         # Output blocks
         self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out_1 = nn.Linear(self.inner_dim, 2 * self.inner_dim)
@@ -266,6 +293,8 @@ class DiT(ModelMixin, ConfigMixin):
         timestep: Optional[torch.LongTensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_all_hidden_states: bool = False,
+        memory_keys: Optional[torch.Tensor] = None,   # (B, N, D_mem)
+        memory_values: Optional[torch.Tensor] = None, # (B, N, D_mem)
     ):
         # Encode timesteps
         temb = self.timestep_encoder(timestep)
@@ -294,6 +323,18 @@ class DiT(ModelMixin, ConfigMixin):
                     encoder_attention_mask=None,
                     temb=temb,
                 )
+
+            # Dense (or selective) memory cross-attention
+            if self.enable_memory_cross_attention and self.memory_attn_blocks is not None:
+                use_layer = (
+                    self.memory_cross_attention_layers is None
+                    or idx in self.memory_cross_attention_layers
+                )
+                if use_layer:
+                    mem_out = self.memory_attn_blocks[idx](
+                        hidden_states, memory_keys=memory_keys, memory_values=memory_values
+                    )
+                    hidden_states = hidden_states + mem_out
             all_hidden_states.append(hidden_states)
 
         # Output processing

@@ -30,6 +30,7 @@ class MemoryAugmentedDatasetWrapper(Dataset):
         base_dataset: Dataset,
         trajectory_encoder: torch.nn.Module,
         window_size: int = 16,
+        action_memory_history_length: int = 512,
         stride: int = 4,
         max_samples_per_trajectory: Optional[int] = None,
         device: str = "cpu",
@@ -47,6 +48,7 @@ class MemoryAugmentedDatasetWrapper(Dataset):
         self.base_dataset = base_dataset
         self.trajectory_encoder = trajectory_encoder.to(device).eval()
         self.window_size = window_size
+        self.action_memory_history_length = action_memory_history_length
         self.stride = stride  # This is the offset stride, not window stride
         self.num_offsets = window_size // stride  # For window_size=16, stride=4 → 4 offsets
         self.max_samples_per_trajectory = max_samples_per_trajectory
@@ -164,6 +166,31 @@ class MemoryAugmentedDatasetWrapper(Dataset):
         # Apply transforms to get the processed data
         # This will give us action with correct shape (action_horizon, D_action)
         step_data_transformed = self.base_dataset.transforms(step_data)
+
+        # Build long-horizon action history for memory (CPU fast path via Arrow)
+        action_history = self.base_dataset.get_action_history_efficient(
+            trajectory_id=trajectory_id,
+            end_index=base_index,
+            history_length=self.action_memory_history_length,
+        )
+        # Concatenate action dims following the configured order
+        action_history_concat = np.concatenate(
+            [action_history[key] for key in self.base_dataset.modality_keys["action"]],
+            axis=-1,
+        ).astype(np.float32)
+        step_data_transformed["action_history"] = action_history_concat
+
+        # Build long-horizon state history for memory (match action history length)
+        state_history = self.base_dataset.get_state_history_efficient(
+            trajectory_id=trajectory_id,
+            end_index=base_index,
+            history_length=self.action_memory_history_length,
+        )
+        state_history_concat = np.concatenate(
+            [state_history[key] for key in self.base_dataset.modality_keys["state"]],
+            axis=-1,
+        ).astype(np.float32)
+        step_data_transformed["state_history"] = state_history_concat
         
         # Add sequence metadata (for collate function to build memory)
         sequence_id, position_in_sequence = self.sample_to_sequence[idx]
@@ -280,7 +307,14 @@ def create_memory_collate_fn(eagle_processor, trajectory_encoder=None):
         # Instead of encoding here (which is slow on CPU in worker process),
         # we'll just collect the action sequences and do encoding later in GPU
         batch_size = len(samples)
-        
+
+        # Stack action histories for GPU-side encoding
+        if "action_history" in samples[0]:
+            histories = [s["action_history"] for s in samples]
+            batch["action_history"] = torch.as_tensor(np.stack(histories, axis=0), dtype=torch.float32)
+        else:
+            batch["action_history"] = None
+
         # Store information for dynamic memory building in main process
         batch['_memory_sequence_id'] = sequence_ids
         batch['_memory_positions'] = positions

@@ -138,14 +138,11 @@ class ArgsConfig:
     enable_action_memory: bool = False
     """Whether to enable action memory mechanism for the model."""
 
-    trajectory_window: int = 32
-    """Number of past trajectory steps to use for memory context."""
+    max_memory_size: int = 32
+    """Maximum number of trajectory latents to store in memory bank (FIFO)."""
 
-    memory_encoder_type: Literal["mlp", "transformer"] = "mlp"
-    """Type of encoder to use for memory embeddings."""
-
-    memory_cross_attention_layers: str = ""
-    """Comma-separated list of layer indices where cross-attention with memory should be applied. e.g. '3,7,10,11'"""
+    memory_readout_nhead: int = 4
+    """Number of attention heads for memory readout cross-attention."""
 
 
 #####################################################################################
@@ -273,15 +270,11 @@ def main(config: ArgsConfig):
     memory_kwargs = {}
     if config.enable_action_memory:
         memory_cfg = {
-            # Note: action_hidden_size will be automatically inferred from action_head_cfg.input_embedding_dim
-            "llm_hidden_size": 2048,  # Eagle-2 default
-            "trajectory_window": config.trajectory_window,
-            "memory_encoder_type": config.memory_encoder_type,
+            # Note: action_dim, action_hidden_size, state_dim, num_embodiments 
+            # will be automatically inferred from action_head_cfg
+            "max_memory_size": config.max_memory_size,
+            "readout_nhead": config.memory_readout_nhead,
         }
-        if config.memory_cross_attention_layers:
-            memory_cfg["memory_cross_attention_layers"] = [
-                int(x.strip()) for x in config.memory_cross_attention_layers.split(",")
-            ]
         memory_kwargs = {
             "use_action_memory": True,
             "memory_cfg": memory_cfg,
@@ -407,7 +400,7 @@ def main(config: ArgsConfig):
         report_to=config.report_to,
         seed=42,
         do_eval=False,
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=config.enable_action_memory,
         ddp_bucket_cap_mb=100,
         torch_compile_mode=None,
     )

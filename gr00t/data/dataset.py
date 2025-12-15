@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -787,6 +787,171 @@ class LeRobotSingleDataset(Dataset):
             max_length=max_length,
             padding_strategy="first_last" if state_or_action_cfg.absolute else "zero",
         )
+
+    def get_action_history_efficient(
+        self,
+        trajectory_id: int,
+        end_index: int,
+        history_length: int = 512,
+        action_keys: Optional[list[str]] = None,
+    ) -> dict[str, np.ndarray]:
+        """
+        Efficiently slice a contiguous window of past actions using Arrow-backed
+        storage. This avoids per-step reads and keeps the operation O(1) on
+        the Parquet/Arrow table.
+
+        Args:
+            trajectory_id: ID of the trajectory.
+            end_index: Exclusive end index within the trajectory (history does
+                NOT include this index; pass end_index + 1 if you want it).
+            history_length: Number of past steps to return.
+            action_keys: Action keys to slice. Defaults to all action keys.
+
+        Returns:
+            Dict mapping action key -> np.ndarray of shape (history_length, D).
+            If the available history is shorter, it is left-padded (front) with
+            either the first valid frame (absolute) or zeros (delta).
+        """
+        if action_keys is None:
+            action_keys = self.modality_keys["action"]
+
+        # Load and cache trajectory data
+        self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        max_length = self.trajectory_lengths[trajectory_index]
+
+        # Clamp end index to valid range
+        end_idx = min(end_index, max_length)
+        start_idx = max(0, end_idx - history_length)
+
+        actual_len = end_idx - start_idx
+        pad_len = max(0, history_length - actual_len)
+
+        # Shortcut: if no steps are available (empty trajectory)
+        if actual_len <= 0:
+            result = {}
+            for key in action_keys:
+                assert key.startswith("action."), f"{key} must be an action key"
+                subkey = key.replace("action.", "")
+                action_cfg = getattr(self.metadata.modalities, "action")[subkey]
+                dim = action_cfg.shape[0]
+                result[key] = np.zeros((history_length, dim), dtype=np.float32)
+            return result
+
+        result: dict[str, np.ndarray] = {}
+        le_action_cfg = getattr(self.lerobot_modality_meta, "action")
+        action_meta = getattr(self.metadata.modalities, "action")
+
+        for key in action_keys:
+            assert key.startswith("action."), f"{key} must start with action., got {key}"
+            subkey = key.replace("action.", "")
+
+            # Map to underlying column name
+            le_key = le_action_cfg[subkey].original_key
+            if le_key is None:
+                le_key = subkey
+
+            # Slice underlying column (O(1) on Arrow-backed storage)
+            col_slice = self.curr_traj_data[le_key].iloc[start_idx:end_idx]
+            action_array = np.stack(col_slice)  # (actual_len, full_dim)
+
+            # Select relevant dims
+            le_indices = np.arange(le_action_cfg[subkey].start, le_action_cfg[subkey].end)
+            action_array = action_array[:, le_indices]
+
+            # Front padding if needed
+            if pad_len > 0:
+                cfg = action_meta[subkey]
+                if cfg.absolute:
+                    first_frame = action_array[0:1]
+                    padding = np.repeat(first_frame, pad_len, axis=0)
+                else:
+                    padding = np.zeros((pad_len, action_array.shape[1]), dtype=action_array.dtype)
+                action_array = np.concatenate([padding, action_array], axis=0)
+
+            # Ensure fixed length and float32
+            if action_array.shape[0] != history_length:
+                # If history_length < actual_len (should not happen with current math)
+                action_array = action_array[-history_length:]
+            result[key] = action_array.astype(np.float32)
+
+        return result
+
+    def get_state_history_efficient(
+        self,
+        trajectory_id: int,
+        end_index: int,
+        history_length: int = 512,
+        state_keys: Optional[list[str]] = None,
+    ) -> dict[str, np.ndarray]:
+        """
+        Efficiently slice a contiguous window of past states (Arrow-backed).
+
+        Args:
+            trajectory_id: ID of the trajectory.
+            end_index: Exclusive end index within the trajectory.
+            history_length: Number of past steps to return.
+            state_keys: State keys to slice. Defaults to all state keys.
+
+        Returns:
+            Dict mapping state key -> np.ndarray of shape (history_length, D).
+            Pads front with first frame (absolute) or zeros (delta) when not enough history.
+        """
+        if state_keys is None:
+            state_keys = self.modality_keys["state"]
+
+        # Load and cache trajectory data
+        self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        max_length = self.trajectory_lengths[trajectory_index]
+
+        end_idx = min(end_index, max_length)
+        start_idx = max(0, end_idx - history_length)
+
+        actual_len = end_idx - start_idx
+        pad_len = max(0, history_length - actual_len)
+
+        if actual_len <= 0:
+            result = {}
+            for key in state_keys:
+                assert key.startswith("state."), f"{key} must be a state key"
+                subkey = key.replace("state.", "")
+                state_cfg = getattr(self.metadata.modalities, "state")[subkey]
+                dim = state_cfg.shape[0]
+                result[key] = np.zeros((history_length, dim), dtype=np.float32)
+            return result
+
+        result: dict[str, np.ndarray] = {}
+        le_state_cfg = getattr(self.lerobot_modality_meta, "state")
+        state_meta = getattr(self.metadata.modalities, "state")
+
+        for key in state_keys:
+            assert key.startswith("state."), f"{key} must start with state., got {key}"
+            subkey = key.replace("state.", "")
+            le_key = le_state_cfg[subkey].original_key
+            if le_key is None:
+                le_key = subkey
+
+            col_slice = self.curr_traj_data[le_key].iloc[start_idx:end_idx]
+            state_array = np.stack(col_slice)  # (actual_len, full_dim)
+
+            le_indices = np.arange(le_state_cfg[subkey].start, le_state_cfg[subkey].end)
+            state_array = state_array[:, le_indices]
+
+            if pad_len > 0:
+                cfg = state_meta[subkey]
+                if cfg.absolute:
+                    first_frame = state_array[0:1]
+                    padding = np.repeat(first_frame, pad_len, axis=0)
+                else:
+                    padding = np.zeros((pad_len, state_array.shape[1]), dtype=state_array.dtype)
+                state_array = np.concatenate([padding, state_array], axis=0)
+
+            if state_array.shape[0] != history_length:
+                state_array = state_array[-history_length:]
+            result[key] = state_array.astype(np.float32)
+
+        return result
 
     def get_language(
         self,
