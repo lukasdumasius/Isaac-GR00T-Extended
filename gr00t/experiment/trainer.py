@@ -122,6 +122,20 @@ class DualBrainTrainer(transformers.Trainer):
 
         return self.optimizer
 
+    def _wrap_model(self, model, training=True, dataloader=None):
+        """
+        Force-enable static_graph on the wrapped DDP model if available,
+        to avoid ready-twice issues when graph topology is fixed.
+        """
+        wrapped = super()._wrap_model(model, training=training, dataloader=dataloader)
+        if hasattr(wrapped, "_set_static_graph"):
+            try:
+                wrapped._set_static_graph()
+                print(">>> DEBUG: DDP static graph enabled via _set_static_graph()")
+            except Exception as e:
+                print(f">>> DEBUG: _set_static_graph() failed: {e}")
+        return wrapped
+
     def save_model(self, output_dir: Optional[str], _internal_call: bool):
         ## save tuned model separately
         if self.is_deepspeed_enabled:

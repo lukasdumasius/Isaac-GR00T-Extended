@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from dataclasses import dataclass, field
 from typing import Tuple
 
@@ -114,6 +115,32 @@ class GR00T_N1_5(PreTrainedModel):
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
         self.compute_dtype = config.compute_dtype
+
+        # Debug toggles for narrowing DDP ready-twice issues
+        freeze_head_all = os.environ.get("DEBUG_FREEZE_ACTION_HEAD_ALL", "0") == "1"
+        freeze_decoder = os.environ.get("DEBUG_FREEZE_ACTION_DECODER", "0") == "1"
+        if freeze_head_all:
+            print(">>> DEBUG: Freezing ALL ActionHead parameters")
+            for p in self.action_head.parameters():
+                p.requires_grad = False
+        elif freeze_decoder:
+            print(">>> DEBUG: Freezing ONLY ActionDecoder parameters")
+            for p in self.action_head.action_decoder.parameters():
+                p.requires_grad = False
+
+        if self.action_memory is not None:
+            freeze_all = os.environ.get("DEBUG_FREEZE_ACTION_MEMORY_ALL", "0") == "1"
+            freeze_readout = os.environ.get("DEBUG_FREEZE_ACTION_MEMORY_READOUT", "0") == "1"
+            if freeze_all:
+                print(">>> DEBUG: Freezing ALL ActionMemory parameters")
+                for p in self.action_memory.parameters():
+                    p.requires_grad = False
+            elif freeze_readout:
+                print(">>> DEBUG: Freezing ONLY Readout, training Encoder")
+                for p in self.action_memory.readout.parameters():
+                    p.requires_grad = False
+                for p in self.action_memory.encoder.parameters():
+                    p.requires_grad = True
 
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
@@ -243,6 +270,16 @@ class GR00T_N1_5(PreTrainedModel):
         )
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         
+        # Debug toggle: force-connect memory_keys to loss to check graph linkage
+        if (
+            os.environ.get("DEBUG_FORCE_MEMORY_TO_LOSS", "0") == "1"
+            and memory_keys is not None
+            and isinstance(action_head_outputs, BatchFeature)
+            and "loss" in action_head_outputs
+        ):
+            print(">>> DEBUG: Force connecting memory_keys to loss")
+            action_head_outputs["loss"] = action_head_outputs["loss"] + 0.0 * memory_keys.sum()
+
         if memory_outputs is not None:
             action_head_outputs["memory_results"] = memory_outputs
             

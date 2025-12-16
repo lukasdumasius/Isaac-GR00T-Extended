@@ -400,7 +400,8 @@ def main(config: ArgsConfig):
         report_to=config.report_to,
         seed=42,
         do_eval=False,
-        ddp_find_unused_parameters=config.enable_action_memory,
+        # DDP stability toggles
+        ddp_find_unused_parameters=False,  # avoid dynamic unused-param tracking
         ddp_bucket_cap_mb=100,
         torch_compile_mode=None,
     )
