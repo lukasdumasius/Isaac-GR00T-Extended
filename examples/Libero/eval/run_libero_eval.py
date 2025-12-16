@@ -60,7 +60,9 @@ class GenerateConfig:
     num_trials_per_task: int = 5                    # Number of rollouts per task
     #################################################################################################################
     # fmt: on
-    """Port to connect to."""
+    """Host/IP of the inference server."""
+    host: str = "localhost"
+    """Port of the inference server."""
     port: int = 5555
     """Headless mode (no GUI)."""
     headless: bool = False
@@ -161,7 +163,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
         # Initialize LIBERO environment and task description
         env, task_description = get_libero_env(task, resolution=256)
 
-        gr00t_policy = GR00TPolicy(host="localhost", port=cfg.port, headless=cfg.headless)
+        gr00t_policy = GR00TPolicy(host=cfg.host, port=cfg.port, headless=cfg.headless)
 
         # Start episodes
         task_episodes, task_successes = 0, 0

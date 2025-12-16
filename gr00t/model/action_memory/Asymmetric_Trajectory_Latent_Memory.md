@@ -3,23 +3,23 @@
 | **Project** | Eagle-2 + DiT Policy with History |
 | :--- | :--- |
 | **Author** | Haoran Yuan |
-| **Date** | 2025-12-14 |
-| **Status** | **Revised / Active** |
+| **Date** | 2025-12-15 |
+| **Status** | **Revised / Active (Aligned with current impl)** |
 
-## 1\. Abstract
+## 1. Abstract
 
 This document proposes a **Latent Sliding Window Memory** architecture designed to resolve "Dead Loop" (repetitive failure) and "Perceptual Aliasing" issues in long-horizon robotic tasks.
 
 The core innovation lies in two asymmetric designs:
 
 1.  **Asymmetric Attention Keys:** We strictly exclude **Visual** information from the Memory Keys, relying solely on **Proprioceptive (Motion)** and **Semantic (Text)** history.
-2.  **Action-Driven Retrieval:** Instead of using static visual observations as queries, we use the **dynamic DiT Action Latent** as the Query. This enables "Motion-to-Motion" homogeneous matching and leverages the stochastic nature of diffusion to break dead loops.
+2.  **Action-Driven Retrieval:** The **vision-conditioned DiT Action Latent** is the Query (motion-to-motion matching), leveraging diffusion stochasticity to break dead loops.
 
 -----
 ![GR00T architecture](image.png)
 
 
-## 2\. Core Philosophy: The Gymnast Analogy (Revised)
+## 2. Core Philosophy: The Gymnast Analogy (Revised)
 
 To explain why we use the **Action Latent** as the Query and exclude vision from the Key:
 
@@ -40,13 +40,13 @@ Consider a gymnast attempting a backflip on a balance beam. She slips (fails). S
 
 -----
 
-## 3\. System Architecture
+## 3. System Architecture
 
 ### 3.1 Components
 
   * **Backbone:** Eagle-2 VLM (Vision/Text Injector) + DiT (Diffusion Transformer Policy).
   * **Memory Unit:** **Trajectory Latent**. A compressed vector ($1 \times D$) representing a chunk of 16 raw action steps.
-  * **Memory Bank:** A FIFO Queue (Sliding Window) covering the past $32 \times 16 = 512$ steps.
+  * **Memory Bank:** FIFO over $32$ trajectory latents (each = 16 raw actions) covering $32\times16=512$ steps.
 
 ### 3.2 Data Flow Diagram
 
@@ -81,7 +81,7 @@ graph TD
 
 -----
 
-## 4\. Detailed Design
+## 4. Detailed Design
 
 ### 4.1 Memory Representation
 
@@ -116,11 +116,19 @@ $$
 ### 4.3 Positional Encoding
 
   * **Fixed Relative Window:** Index 0 (Oldest) to 31 (Newest).
-  * **Translation Invariance:** Essential for cyclic tasks (e.g., wiping a table) where the absolute timestamp matters less than the relative order.
+  * **Translation Invariance:** Relative order only; fits cyclic tasks.
+
+### 4.4 Trajectory Encoder (Implemented)
+
+  * **Dual-Stream Chunk Compressor:** Separate encoders for action and state; inputs are 16-step chunks, padded/normalized to fixed dims (action max 32, state max 64).
+  * **Fusion:** Action/state latents are fused (concat + MLP) to produce `traj_latent` (shape `[1, D]`, D=DiT hidden size).
+  * **Memory Element:** Each memory slot holds one fused latent per 16-step chunk.
+  * **Dtype Safety:** Inputs cast to model dtype (bf16 on GPU, fp32 on CPU) before projection.
+  * **Keys/Values:** Key = `traj_latent + pos_emb + text_emb(zeros)`, Value = `traj_latent + pos_emb`. Memory bank length 32 (covers 512 steps).
 
 -----
 
-## 5\. Training Strategy
+## 5. Training & Serving Alignment (Current Impl)
 
 ### 5.1 The "Stitched" Trajectory Training
 
@@ -129,9 +137,24 @@ To teach the model to use memory for correction, we cannot just use perfect expe
   * **Standard Loading:** Load continuous sequence of $T=32$ chunks.
   * **Consistency Loss:** We do not need an auxiliary loss for memory retrieval. The gradient from the DiT noise prediction loss ($\mathcal{L}_{simple}$) will naturally backpropagate through the Attention layer, teaching the model: *"To de-noise this action correctly, I must look at Step $t-1$ in the memory."*
 
+### 5.2 Data Loader & Collate (Implemented)
+  * **Memory-Augmented Dataset Wrapper:** Loads up to 512-step histories, chunked into 16-step segments to fill the memory bank.
+  * **Transforms:** `GR00TTransform` handles resize/crop/normalize and padding of action/state to fixed dims; dtype casting handled later in the compressor.
+  * **Masks & Fallbacks:** Collate sets masks; if a modality becomes all-zero (demo edge cases), raw action/state are injected as fallback to avoid NaNs; state/action masks default to ones in tests.
+  * **Teacher-Forcing:** Training uses GT chunks to build memory keys/values; inference updates FIFO per step/chunk.
+  * **Embodiment:** `embodiment_id` maps to projector index; `libero_franka` reuses the `new_embodiment` slot (index 31).
+
+### 5.3 Serving details (what we run now)
+- **Embodiment tag mapping:** `new_embodiment` and `libero_franka` both map to projector index **31**. Checkpoints include metadata for `new_embodiment`; services should prefer `--embodiment_tag new_embodiment` unless metadata is duplicated for `libero_franka`.
+- **Metadata video keys:** Use `video.image` and `video.wrist_image`. If metadata still has `image2`, replace with `wrist_image` (e.g., `sed -i 's/"image2"/"wrist_image"/g' metadata.json`).
+- **Checkpoint path:** For speed, copy to NVMe (e.g., `/tmp/ckpt-libero-35000`) and point server there.
+- **Server (gRPC):** `scripts/run_inference_server.sh` defaults to `/tmp/ckpt-libero-35000`, `DATA_CONFIG=examples.Libero.custom_data_config:LiberoDataConfig`, `EMBODIMENT_TAG=new_embodiment`, `PORT=5556`, and sets `PYTHONPATH` to the repo.
+- **Client:** `examples/Libero/eval/run_eval_client.sh` connects via HOST/PORT, runs tasks (e.g., `libero_spatial`), logs to `/tmp/logs/`.
+- **Smoke tests:** `tests/test_online_client.py` (gRPC reachability), `tests/test_libero_env.py` (LIBERO deps/env creation).
+
 -----
 
-## 6\. Implementation Snippet (Pseudo-code)
+## 6. Implementation Snippet (Pseudo-code)
 
 This implementation shows the **Hybrid Injection** within a DiT Block.
 
@@ -183,6 +206,17 @@ class MemoryAwareDiTBlock(nn.Module):
         return x
 ```
 
-## 7\. Conclusion
+## 7. Conclusion
 
 This revised architecture aligns the retrieval mechanism with the physics of the problem. By using the **Action Latent as the Query**, we perform retrieval in a homogeneous feature space (Motion-to-Motion), ensuring higher relevance. By relying on the stochasticity of the diffusion process, the query changes even under static visual inputs, effectively preventing "Dead Loops" caused by visual aliasing.
+
+-----
+
+## 8. Future Work
+
+1. **Gated Cross-Attention** — Zero-init gate to learn when memory should influence the policy, reducing early training instability.  
+2. **Adaptive Eviction** — Eviction driven by attention/reward/task signals instead of pure FIFO.  
+3. **Multimodal Retrieval (Optional)** — Allow text/vision prompts as retrieval conditions while keeping Keys vision-free.  
+4. **Hierarchical Long-Horizon Memory** — Short-window FIFO plus long-term summaries (e.g., EMA/summary slots) for very long sequences.  
+5. **Training Improvements** — More recovery-heavy data, masking/noise regularizers, MoE experts for robustness.  
+6. **Evaluation Plan** — Online Evaluation with LIBERO

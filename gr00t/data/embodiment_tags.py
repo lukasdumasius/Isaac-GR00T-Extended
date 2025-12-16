@@ -37,10 +37,16 @@ class EmbodimentTag(Enum):
     Any new embodiment for finetuning.
     """
 
+    LIBERO_FRANKA = "libero_franka"
+    """
+    The Libero Franka embodiment (Libero suite).
+    """
+
 
 # Embodiment tag string: to projector index in the Action Expert Module
 EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.NEW_EMBODIMENT.value: 31,
+    EmbodimentTag.LIBERO_FRANKA.value: 31,
     EmbodimentTag.OXE_DROID.value: 17,
     EmbodimentTag.AGIBOT_GENIE1.value: 26,
     EmbodimentTag.GR1.value: 24,
