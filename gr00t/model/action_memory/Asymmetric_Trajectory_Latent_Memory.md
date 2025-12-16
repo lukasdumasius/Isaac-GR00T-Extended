@@ -52,31 +52,20 @@ Consider a gymnast attempting a backflip on a balance beam. She slips (fails). S
 
 ```mermaid
 graph TD
-    subgraph "DiT Denosing Step k"
+    IMG[Image] --> VLM[Eagle-2 VLM]
+    TXT[Prompt] --> VLM
+    NOISE[Action Latent x_k] --> FILM[FiLM / Cross-Attn]
+    VLM --> FILM
+    FILM --> Q_LATENT[Action Query Motion Space]
     
-    %% Inputs
-    IMG[Image] & TXT[Prompt] --> VLM[Eagle-2]
-    NOISE[Action Latent x_k] 
+    HIST[History Latents] --> KEY[Motion Key No Vision]
+    HIST --> VAL[Motion Value]
     
-    %% Step 1: Visual Injection
-    VLM --"1. Visual Condition"--> FILM[FiLM / Cross-Attn]
-    NOISE --> FILM
-    FILM --> Q_LATENT[Action Query (Motion Space)]
+    Q_LATENT --> ATTN[Memory Cross-Attention]
+    KEY --> ATTN
+    VAL --> ATTN
     
-    %% Memory Side
-    subgraph "Memory Bank"
-    HIST[History Latents]
-    end
-    
-    HIST --"2. Motion Key (No Vision)"--> KEY
-    HIST --"3. Motion Value"--> VAL
-    
-    %% Step 2: Retrieval
-    Q_LATENT & KEY & VAL --> ATTN[Memory Cross-Attention]
-    
-    %% Output
     ATTN --> UPDATE[Refined Action x_k-1]
-    end
 ```
 
 -----
@@ -97,19 +86,22 @@ $$
 $$
 
   * **Query (Current Action Hypothesis):**
-    $$Q = \text{DiT\_Latent}_{curr} \quad (\text{conditioned on } \text{Visual}_{feat})$$
+    
+$$Q = \text{DiT Latent}_{\text{curr}} \quad (\text{conditioned on } \text{Visual}_{\text{feat}})$$
 
     > *Rationale:* **Homogeneous Matching.** We match "Current Motion Intent" against "Past Motion History."
     > *Benefit:* Since DiT generation is stochastic (starts from random noise), $Q$ is slightly different even for identical images. This variation allows the model to retrieve different history and **break dead loops**.
 
   * **Key (History Index - NO VISION):**
-    $$K = \text{Trajectory\_Latent}_{hist} + \text{Fixed\_PE} + \text{Text\_Emb}$$
+    
+$$K = \text{Trajectory Latent}_{\text{hist}} + \text{Fixed PE} + \text{Text Emb}$$
 
     > *Rationale:* "At that stage (PE) of that task (Text), what motion did I perform?"
     > *Function:* **Text** acts as a semantic filter (task separation); **Motion** ensures dynamic consistency.
 
   * **Value (History Content - Pure Motion):**
-    $$V = \text{Trajectory\_Latent}_{hist} + \text{Fixed\_PE}$$
+    
+$$V = \text{Trajectory Latent}_{\text{hist}} + \text{Fixed PE}$$
 
     > *Rationale:* The raw muscle memory used to refine the current trajectory.
 
